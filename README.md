@@ -61,6 +61,7 @@ opens a right-hand split when no dashboard exists.
 | `t` | Trigger a rebuild of the selected service |
 | `e` | Enable or disable the selected service |
 | `l` | Open live logs for the selected service |
+| `a` | Open or run actions for the selected service |
 | `u` | Start a retained `tilt up` session |
 | `d`, then `y` | Confirm, stop Tilt, and run `tilt down` |
 | `n` | Cancel a pending Down confirmation |
@@ -84,6 +85,16 @@ in every applicable group, and unlabeled services appear under `Ungrouped` at
 the end. Group headers show their aggregate status and service count and remain
 collapsed across dashboard refreshes. The synthetic `(Tiltfile)` resource is
 hidden from the service list, while its errors appear in the warning banner.
+
+Services with Tilt endpoint links or custom resource-scoped UI buttons show a
+right-aligned `↗` marker (and an action count when there is more than one).
+Press `a` to run the only action immediately or open a picker when multiple
+actions are available. Use `↑`/`↓` or `j`/`k` in the picker, `Enter` or `Space`
+to activate, and `q` or `Esc` to return. URL actions open in the system browser.
+Buttons that Tilt marks as requiring confirmation prompt for `y` or `n`, and
+button inputs use their Tilt-configured defaults. Tilt's built-in Stop Build
+and Disable Toggle buttons are omitted because the dashboard already provides
+dedicated trigger and enable/disable controls.
 
 ## Live logs
 

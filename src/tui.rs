@@ -10,7 +10,8 @@ use crate::project::Project;
 use crate::project::{InvocationContext, resolve_project};
 use crate::session::{SessionPhase, load_session};
 use crate::tilt::{
-    CircleStatus, ResourceGroup, Service, parse_session_identity, parse_ui_resources,
+    CircleStatus, ResourceGroup, Service, ServiceAction, activate_service_action,
+    attach_service_actions, parse_session_identity, parse_ui_buttons, parse_ui_resources,
 };
 use anyhow::{Context, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -44,6 +45,61 @@ enum SelectedServiceAction {
     Trigger,
     ToggleEnabled,
     Logs,
+    Actions,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ActionPickerEvent {
+    None,
+    Back,
+    Activate(ServiceAction),
+}
+
+#[derive(Debug)]
+struct ActionPicker {
+    service_name: String,
+    actions: Vec<ServiceAction>,
+    state: ListState,
+}
+
+impl ActionPicker {
+    fn new(service_name: String, actions: Vec<ServiceAction>) -> Self {
+        let mut state = ListState::default();
+        if !actions.is_empty() {
+            state.select(Some(0));
+        }
+        Self {
+            service_name,
+            actions,
+            state,
+        }
+    }
+
+    fn selected(&self) -> Option<&ServiceAction> {
+        self.actions.get(self.state.selected()?)
+    }
+
+    fn handle_key(&mut self, key: KeyCode) -> ActionPickerEvent {
+        let selected = self.state.selected().unwrap_or_default();
+        match key {
+            KeyCode::Char('q') | KeyCode::Esc => ActionPickerEvent::Back,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.state.select(Some(selected.saturating_sub(1)));
+                ActionPickerEvent::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.state.select(Some(
+                    (selected + 1).min(self.actions.len().saturating_sub(1)),
+                ));
+                ActionPickerEvent::None
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => self
+                .selected()
+                .cloned()
+                .map_or(ActionPickerEvent::None, ActionPickerEvent::Activate),
+            _ => ActionPickerEvent::None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +211,7 @@ impl ServiceListState {
             KeyCode::Char('t') => SelectedServiceAction::Trigger,
             KeyCode::Char('e') => SelectedServiceAction::ToggleEnabled,
             KeyCode::Char('l') => SelectedServiceAction::Logs,
+            KeyCode::Char('a') => SelectedServiceAction::Actions,
             _ => return None,
         };
         let selected = self.inner.selected()?;
@@ -312,7 +369,7 @@ impl DashboardModel {
             bail!("Tilt API port belongs to another Tiltfile or process");
         }
 
-        let output = Command::new(tilt)
+        let output = Command::new(&tilt)
             .args([
                 "get",
                 "uiresources",
@@ -331,7 +388,22 @@ impl DashboardModel {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        let snapshot = parse_ui_resources(&String::from_utf8_lossy(&output.stdout))?;
+        let mut snapshot = parse_ui_resources(&String::from_utf8_lossy(&output.stdout))?;
+        let buttons = Command::new(tilt.as_ref())
+            .args([
+                "get",
+                "uibuttons",
+                "-o",
+                "json",
+                "--port",
+                &port.to_string(),
+            ])
+            .output()
+            .context("query Tilt UIButtons")?;
+        if buttons.status.success() {
+            let actions = parse_ui_buttons(&String::from_utf8_lossy(&buttons.stdout))?;
+            attach_service_actions(&mut snapshot, actions);
+        }
         self.services = snapshot.services;
         self.groups = snapshot.groups;
         self.warning = snapshot.tiltfile_error;
@@ -485,6 +557,8 @@ pub fn run_from_env() -> Result<()> {
     let mut show_help = false;
     let mut service_list = ServiceListState::default();
     let mut log_view: Option<LogView> = None;
+    let mut action_picker: Option<ActionPicker> = None;
+    let mut pending_action: Option<ServiceAction> = None;
 
     loop {
         if let Some(view) = log_view.as_mut() {
@@ -503,6 +577,48 @@ pub fn run_from_env() -> Result<()> {
             if handle_log_key(&mut view.buffer, key.code, page_size) {
                 log_view = None;
                 last_refresh = Instant::now() - Duration::from_secs(2);
+            }
+            continue;
+        }
+        if let Some(picker) = action_picker.as_mut() {
+            terminal
+                .terminal
+                .draw(|frame| render_action_picker(frame, picker, pending_action.is_some()))?;
+            if !event::poll(Duration::from_millis(100))? {
+                continue;
+            }
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if pending_action.is_some() {
+                match down_confirmation_decision(key.code) {
+                    Some(DownConfirmationDecision::Confirm) => {
+                        let action = pending_action.take().expect("pending action exists");
+                        if let Err(error) = activate_service_action(&action, model.active_port()) {
+                            model.set_warning(error.to_string());
+                        }
+                        last_refresh = Instant::now() - Duration::from_secs(2);
+                    }
+                    Some(DownConfirmationDecision::Cancel) => pending_action = None,
+                    None => {}
+                }
+                continue;
+            }
+            match picker.handle_key(key.code) {
+                ActionPickerEvent::Back => action_picker = None,
+                ActionPickerEvent::Activate(action) if action.requires_confirmation() => {
+                    pending_action = Some(action)
+                }
+                ActionPickerEvent::Activate(action) => {
+                    if let Err(error) = activate_service_action(&action, model.active_port()) {
+                        model.set_warning(error.to_string());
+                    }
+                    last_refresh = Instant::now() - Duration::from_secs(2);
+                }
+                ActionPickerEvent::None => {}
             }
             continue;
         }
@@ -565,6 +681,23 @@ pub fn run_from_env() -> Result<()> {
                         Ok(view) => log_view = Some(view),
                         Err(error) => model.set_warning(error.to_string()),
                     }
+                    continue;
+                }
+                SelectedServiceAction::Actions => {
+                    match service.actions.as_slice() {
+                        [] => model.set_warning(format!("{} has no actions", service.name)),
+                        [action] if !action.requires_confirmation() => {
+                            if let Err(error) = activate_service_action(action, model.active_port())
+                            {
+                                model.set_warning(error.to_string());
+                            }
+                        }
+                        actions => {
+                            action_picker =
+                                Some(ActionPicker::new(service.name.clone(), actions.to_vec()));
+                        }
+                    }
+                    last_refresh = Instant::now() - Duration::from_secs(2);
                     continue;
                 }
             };
@@ -844,6 +977,142 @@ fn log_shortcut_legend(width: u16, wrapping: bool) -> Vec<Line<'static>> {
     lines
 }
 
+fn render_action_picker(
+    frame: &mut ratatui::Frame<'_>,
+    picker: &mut ActionPicker,
+    confirming: bool,
+) {
+    let footer = if confirming {
+        action_confirmation_footer(
+            frame.area().width,
+            picker
+                .selected()
+                .map(ServiceAction::label)
+                .unwrap_or("action"),
+        )
+    } else {
+        wrap_shortcuts(
+            frame.area().width,
+            &[
+                ("↑/↓/j/k", "nav", true),
+                ("↵/space", "open", true),
+                ("q/esc", "back", true),
+            ],
+        )
+    };
+    let footer_height = u16::try_from(footer.len()).unwrap_or(u16::MAX).max(1);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(footer_height),
+        ])
+        .split(frame.area());
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                picker.service_name.clone(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" actions", Style::default().fg(Color::DarkGray)),
+        ])),
+        chunks[0],
+    );
+    let items = picker.actions.iter().map(|action| {
+        let (icon, detail) = match action {
+            ServiceAction::Link { url, .. } => ("↗ ", url.as_str()),
+            ServiceAction::Button {
+                requires_confirmation,
+                ..
+            } => (
+                "▶ ",
+                if *requires_confirmation {
+                    "confirmation required"
+                } else {
+                    "Tilt action"
+                },
+            ),
+        };
+        ListItem::new(Line::from(vec![
+            Span::styled(icon, Style::default().fg(Color::Cyan)),
+            Span::styled(
+                action.label().to_owned(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {detail}"), Style::default().fg(Color::DarkGray)),
+        ]))
+    });
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(Style::default().bg(SERVICE_SELECTION_BG)),
+        chunks[1],
+        &mut picker.state,
+    );
+    frame.render_widget(
+        Paragraph::new(Text::from(footer)).wrap(Wrap { trim: true }),
+        chunks[2],
+    );
+}
+
+fn action_confirmation_footer(width: u16, label: &str) -> Vec<Line<'static>> {
+    let prompt = format!("Run {label}?");
+    let entries = [
+        (prompt.as_str(), "", true),
+        ("y", "yes", true),
+        ("n", "no", true),
+    ];
+    wrap_shortcuts(width, &entries)
+}
+
+fn wrap_shortcuts(width: u16, entries: &[(&str, &str, bool)]) -> Vec<Line<'static>> {
+    let separator = Span::styled(" │ ", Style::default().fg(Color::Rgb(72, 72, 72)));
+    let mut lines = Vec::new();
+    let mut spans = Vec::new();
+    let mut line_width = 0;
+    for (key, label, enabled) in entries {
+        let entry = vec![
+            Span::styled(
+                (*key).to_owned(),
+                Style::default().fg(if *enabled {
+                    Color::Gray
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+            Span::styled(
+                if label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {label}")
+                },
+                Style::default().fg(Color::DarkGray),
+            ),
+        ];
+        let entry_width = Line::from(entry.clone()).width();
+        let separator_width = if spans.is_empty() {
+            0
+        } else {
+            separator.width()
+        };
+        if !spans.is_empty() && line_width + separator_width + entry_width > usize::from(width) {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            line_width = 0;
+        }
+        if !spans.is_empty() {
+            spans.push(separator.clone());
+            line_width += separator.width();
+        }
+        spans.extend(entry);
+        line_width += entry_width;
+    }
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
 fn render(
     frame: &mut ratatui::Frame<'_>,
     model: &DashboardModel,
@@ -927,15 +1196,9 @@ fn render(
                         ),
                     ]))
                 }
-                ServiceListRow::Service(service) => ListItem::new(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled("● ", Style::default().fg(circle_color(service.status))),
-                    Span::styled(
-                        service.name.clone(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(format!("  {}", service.detail)),
-                ])),
+                ServiceListRow::Service(service) => {
+                    ListItem::new(service_line(service, chunks[2].width))
+                }
             })
             .collect()
     };
@@ -949,6 +1212,54 @@ fn render(
         Paragraph::new(Text::from(footer_lines)).wrap(Wrap { trim: true }),
         chunks[3],
     );
+}
+
+fn service_line(service: &Service, width: u16) -> Line<'static> {
+    let badge = (!service.actions.is_empty()).then(|| {
+        if service.actions.len() == 1 {
+            "↗".to_owned()
+        } else {
+            format!("↗ {}", service.actions.len())
+        }
+    });
+    let reserved = badge.as_ref().map_or(0, |badge| badge.chars().count() + 1);
+    let left_width = usize::from(width).saturating_sub(reserved);
+    let name_width = left_width.saturating_sub(4);
+    let name = clip_with_ellipsis(&service.name, name_width);
+    let detail_width = left_width.saturating_sub(4 + name.chars().count());
+    let detail = if detail_width >= 3 {
+        clip_with_ellipsis(&format!("  {}", service.detail), detail_width)
+    } else {
+        String::new()
+    };
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled("● ", Style::default().fg(circle_color(service.status))),
+        Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(detail),
+    ];
+    if let Some(badge) = badge {
+        let content_width = Line::from(spans.clone()).width();
+        let padding = usize::from(width).saturating_sub(content_width + badge.chars().count());
+        spans.push(Span::raw(" ".repeat(padding)));
+        spans.push(Span::styled(badge, Style::default().fg(Color::Cyan)));
+    }
+    Line::from(spans)
+}
+
+fn clip_with_ellipsis(value: &str, width: usize) -> String {
+    let length = value.chars().count();
+    if length <= width {
+        value.to_owned()
+    } else if width == 0 {
+        String::new()
+    } else if width == 1 {
+        "…".to_owned()
+    } else {
+        let mut clipped = value.chars().take(width - 1).collect::<String>();
+        clipped.push('…');
+        clipped
+    }
 }
 
 fn service_metric_lines(model: &DashboardModel, width: u16) -> Vec<Line<'static>> {
@@ -1025,6 +1336,7 @@ fn shortcut_legend(model: &DashboardModel, width: u16, show_help: bool) -> Vec<L
             ("t", "trigger", navigation_enabled),
             ("e", "enable/disable", navigation_enabled),
             ("l", "logs", navigation_enabled),
+            ("a", "actions", navigation_enabled),
             ("u", "up", model.can_start()),
             ("d", "down", model.can_stop()),
             ("r", "refresh", true),
@@ -1038,6 +1350,7 @@ fn shortcut_legend(model: &DashboardModel, width: u16, show_help: bool) -> Vec<L
             ("t", "trigger", navigation_enabled),
             ("e", "enable/disable", navigation_enabled),
             ("l", "logs", navigation_enabled),
+            ("a", "actions", navigation_enabled),
             ("u", "up", model.can_start()),
             ("d", "down", model.can_stop()),
             ("r", "refresh", true),
@@ -1180,6 +1493,7 @@ mod tests {
                 status: CircleStatus::Green,
                 detail: "healthy".to_owned(),
                 disabled: false,
+                actions: vec![],
             }],
         }
     }
@@ -1211,6 +1525,7 @@ mod tests {
                     status: CircleStatus::Green,
                     detail: "healthy".to_owned(),
                     disabled: false,
+                    actions: vec![],
                 })
                 .collect(),
         }];
@@ -1341,11 +1656,146 @@ mod tests {
                 .0,
             SelectedServiceAction::Logs
         );
+        assert_eq!(
+            list_state
+                .selected_service_action(KeyCode::Char('a'), &groups)
+                .unwrap()
+                .0,
+            SelectedServiceAction::Actions
+        );
         assert!(
             list_state
                 .selected_service_action(KeyCode::Char('x'), &groups)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn service_rows_show_a_right_aligned_action_count() {
+        let mut service = group("apps", "frontend").services.remove(0);
+        service.actions = vec![
+            ServiceAction::Link {
+                label: "App".to_owned(),
+                url: "https://app.test".to_owned(),
+            },
+            ServiceAction::Button {
+                name: "seed".to_owned(),
+                label: "Seed".to_owned(),
+                requires_confirmation: false,
+                inputs: vec![],
+            },
+        ];
+
+        let line = service_line(&service, 40);
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(rendered.starts_with("  ● frontend  healthy"));
+        assert!(rendered.ends_with("↗ 2"));
+        assert_eq!(line.width(), 40);
+    }
+
+    #[test]
+    fn action_indicator_survives_a_long_service_detail() {
+        let mut service = group("apps", "frontend").services.remove(0);
+        service.detail = "a very long build failure that cannot fit in this pane".to_owned();
+        service.actions = vec![ServiceAction::Link {
+            label: "App".to_owned(),
+            url: "https://app.test".to_owned(),
+        }];
+
+        let line = service_line(&service, 24);
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(line.width(), 24);
+        assert!(rendered.ends_with('↗'));
+    }
+
+    #[test]
+    fn action_picker_navigates_selects_and_returns() {
+        let actions = vec![
+            ServiceAction::Link {
+                label: "App".to_owned(),
+                url: "https://app.test".to_owned(),
+            },
+            ServiceAction::Button {
+                name: "seed".to_owned(),
+                label: "Seed".to_owned(),
+                requires_confirmation: false,
+                inputs: vec![],
+            },
+        ];
+        let mut picker = ActionPicker::new("frontend".to_owned(), actions.clone());
+
+        assert_eq!(picker.handle_key(KeyCode::Down), ActionPickerEvent::None);
+        assert_eq!(
+            picker.handle_key(KeyCode::Enter),
+            ActionPickerEvent::Activate(actions[1].clone())
+        );
+        assert_eq!(picker.handle_key(KeyCode::Esc), ActionPickerEvent::Back);
+    }
+
+    #[test]
+    fn action_picker_replaces_the_dashboard_and_lists_action_kinds() {
+        let mut picker = ActionPicker::new(
+            "frontend".to_owned(),
+            vec![
+                ServiceAction::Link {
+                    label: "Open app".to_owned(),
+                    url: "https://app.test".to_owned(),
+                },
+                ServiceAction::Button {
+                    name: "seed".to_owned(),
+                    label: "Seed data".to_owned(),
+                    requires_confirmation: true,
+                    inputs: vec![],
+                },
+            ],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+
+        terminal
+            .draw(|frame| render_action_picker(frame, &mut picker, false))
+            .unwrap();
+        let rendered = buffer_text(&terminal);
+
+        assert!(rendered.contains("frontend actions"));
+        assert!(rendered.contains("↗ Open app"));
+        assert!(rendered.contains("▶ Seed data"));
+        assert!(rendered.contains("↵/space open"));
+        assert!(rendered.contains("q/esc back"));
+        assert!(!rendered.contains("Services:"));
+    }
+
+    #[test]
+    fn action_confirmation_replaces_picker_footer() {
+        let mut picker = ActionPicker::new(
+            "frontend".to_owned(),
+            vec![ServiceAction::Button {
+                name: "seed".to_owned(),
+                label: "Seed data".to_owned(),
+                requires_confirmation: true,
+                inputs: vec![],
+            }],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+
+        terminal
+            .draw(|frame| render_action_picker(frame, &mut picker, true))
+            .unwrap();
+        let rendered = buffer_text(&terminal);
+
+        assert!(rendered.contains("Run Seed data?"));
+        assert!(rendered.contains("y yes"));
+        assert!(rendered.contains("n no"));
+        assert!(!rendered.contains("q/esc back"));
     }
 
     #[test]
@@ -1372,6 +1822,7 @@ mod tests {
             "t trigger",
             "e enable/disable",
             "l logs",
+            "a actions",
             "u up",
             "d down",
             "r refresh",
@@ -1414,6 +1865,7 @@ mod tests {
             "t trigger",
             "e enable/disable",
             "l logs",
+            "a actions",
             "u up",
             "d down",
             "r refresh",
@@ -1552,6 +2004,7 @@ mod tests {
             status,
             detail: name.to_owned(),
             disabled: false,
+            actions: vec![],
         })
         .collect();
         model.groups = vec![ResourceGroup {
@@ -1606,6 +2059,7 @@ mod tests {
             status,
             detail: "status".to_owned(),
             disabled: false,
+            actions: vec![],
         })
         .collect();
         model.groups = vec![ResourceGroup {

@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use herdr_tilt::project::Project;
 use herdr_tilt::session::{SessionPhase, SessionRecord, record_path};
-use herdr_tilt::tilt::CircleStatus;
+use herdr_tilt::tilt::{CircleStatus, ServiceAction};
 use herdr_tilt::tui::{DashboardModel, OverallStatus};
 
 #[test]
@@ -61,8 +61,10 @@ fn running_dashboard_refreshes_services_from_tilt() {
             r#"#!/bin/sh
 if [ "$2" = "sessions" ]; then
   printf '%s\n' '{{"items":[{{"spec":{{"tiltfilePath":"{}"}},"status":{{"pid":101,"startTime":"2026-08-20T01:02:03Z"}}}}]}}'
+elif [ "$2" = "uibuttons" ]; then
+  printf '%s\n' '{{"items":[{{"metadata":{{"name":"api-seed"}},"spec":{{"text":"Seed","location":{{"componentID":"api","componentType":"Resource"}}}}}}]}}'
 else
-  printf '%s\n' '{{"items":[{{"metadata":{{"name":"api"}},"status":{{"order":1,"updateStatus":"ok","runtimeStatus":"ok"}}}}]}}'
+  printf '%s\n' '{{"items":[{{"metadata":{{"name":"api"}},"status":{{"order":1,"updateStatus":"ok","runtimeStatus":"ok","endpointLinks":[{{"name":"API","url":"https://api.test"}}]}}}}]}}'
 fi
 "#,
             project.tiltfile.as_ref().unwrap().display()
@@ -78,6 +80,14 @@ fi
     assert_eq!(model.services.len(), 1);
     assert_eq!(model.services[0].name, "api");
     assert_eq!(model.services[0].status, CircleStatus::Green);
+    assert!(matches!(
+        model.services[0].actions[0],
+        ServiceAction::Link { .. }
+    ));
+    assert!(matches!(
+        model.services[0].actions[1],
+        ServiceAction::Button { .. }
+    ));
     assert!(!model.can_start());
     assert!(model.can_stop());
 }
