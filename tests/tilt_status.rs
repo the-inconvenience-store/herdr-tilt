@@ -62,6 +62,61 @@ fn ui_resources_become_ordered_four_color_services() {
 }
 
 #[test]
+fn ui_resources_are_grouped_by_labels_with_ungrouped_last() {
+    let json = r#"
+    {
+      "items": [
+        {
+          "metadata": {"name": "database", "labels": {"infra": "infra"}},
+          "status": {"order": 2, "updateStatus": "error", "runtimeStatus": "ok"}
+        },
+        {
+          "metadata": {
+            "name": "api",
+            "labels": {"services": "services", "apps": "apps"}
+          },
+          "status": {"order": 1, "updateStatus": "ok", "runtimeStatus": "ok"}
+        },
+        {
+          "metadata": {"name": "docs"},
+          "status": {"order": 3, "updateStatus": "ok", "runtimeStatus": "ok"}
+        },
+        {
+          "metadata": {"name": "cache", "labels": {"infra": "infra"}},
+          "status": {"order": 1, "updateStatus": "in_progress", "runtimeStatus": "pending"}
+        }
+      ]
+    }
+    "#;
+
+    let snapshot = parse_ui_resources(json).unwrap();
+
+    assert_eq!(
+        snapshot
+            .groups
+            .iter()
+            .map(|group| {
+                (
+                    group.name.as_str(),
+                    group.status,
+                    group
+                        .services
+                        .iter()
+                        .map(|service| service.name.as_str())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        [
+            ("apps", CircleStatus::Green, vec!["api"]),
+            ("infra", CircleStatus::Red, vec!["cache", "database"]),
+            ("services", CircleStatus::Green, vec!["api"]),
+            ("Ungrouped", CircleStatus::Green, vec!["docs"]),
+        ]
+    );
+}
+
+#[test]
 fn session_identity_uses_the_tilt_reported_tiltfile_and_pid() {
     let json = r#"
     {

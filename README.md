@@ -57,6 +57,8 @@ opens a right-hand split when no dashboard exists.
 | `↑`/`↓` or `k`/`j` | Move through services |
 | `Page Up`/`Page Down` | Move ten services at a time |
 | `Home`/`End` | Jump to the first or last service |
+| `Enter` or `Space` | Toggle the selected resource group |
+| `←`/`→` | Collapse or expand the selected resource group |
 | `u` | Start a retained `tilt up` session |
 | `d`, `d` | Confirm, stop Tilt, and run `tilt down` |
 | `r` | Refresh immediately |
@@ -72,9 +74,12 @@ warning and disables Up and Down.
 - Red: update, build, or runtime error
 - Grey: disabled, inactive, stopped, or unknown
 
-Services are ordered the same way as Tilt's UI. The synthetic `(Tiltfile)`
-resource is hidden from the service list, while its errors appear in the
-warning banner.
+Services are grouped by their Tilt labels. Groups are alphabetical, services
+retain Tilt's resource order within each group, multi-labeled services appear
+in every applicable group, and unlabeled services appear under `Ungrouped` at
+the end. Group headers show their aggregate status and service count and remain
+collapsed across dashboard refreshes. The synthetic `(Tiltfile)` resource is
+hidden from the service list, while its errors appear in the warning banner.
 
 ## Session behavior
 

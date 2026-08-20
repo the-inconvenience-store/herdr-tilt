@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
@@ -7,7 +8,9 @@ use std::time::{Duration, Instant};
 use crate::project::Project;
 use crate::project::{InvocationContext, resolve_project};
 use crate::session::{SessionPhase, load_session};
-use crate::tilt::{CircleStatus, Service, parse_session_identity, parse_ui_resources};
+use crate::tilt::{
+    CircleStatus, ResourceGroup, Service, parse_session_identity, parse_ui_resources,
+};
 use anyhow::{Context, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -38,42 +41,101 @@ enum ServiceNavigation {
 #[derive(Debug, Default)]
 struct ServiceListState {
     inner: ListState,
+    collapsed: BTreeSet<String>,
 }
 
 impl ServiceListState {
-    fn sync(&mut self, service_count: usize) {
-        if service_count == 0 {
+    fn visible_rows<'a>(&self, groups: &'a [ResourceGroup]) -> Vec<ServiceListRow<'a>> {
+        let mut rows = Vec::new();
+        for group in groups {
+            rows.push(ServiceListRow::Group(group));
+            if !self.collapsed.contains(&group.name) {
+                rows.extend(group.services.iter().map(ServiceListRow::Service));
+            }
+        }
+        rows
+    }
+
+    fn sync(&mut self, groups: &[ResourceGroup]) {
+        let row_count = self.visible_rows(groups).len();
+        if row_count == 0 {
             self.inner.select(None);
         } else {
-            let selected = self
-                .inner
-                .selected()
-                .unwrap_or_default()
-                .min(service_count - 1);
+            let selected = self.inner.selected().unwrap_or_default().min(row_count - 1);
             self.inner.select(Some(selected));
         }
     }
 
-    fn navigate(&mut self, navigation: ServiceNavigation, service_count: usize) {
-        if service_count == 0 {
+    fn navigate(&mut self, navigation: ServiceNavigation, groups: &[ResourceGroup]) {
+        let row_count = self.visible_rows(groups).len();
+        if row_count == 0 {
             self.inner.select(None);
             return;
         }
-        let selected = self
-            .inner
-            .selected()
-            .unwrap_or_default()
-            .min(service_count - 1);
+        let selected = self.inner.selected().unwrap_or_default().min(row_count - 1);
         let selected = match navigation {
             ServiceNavigation::Up => selected.saturating_sub(1),
-            ServiceNavigation::Down => (selected + 1).min(service_count - 1),
+            ServiceNavigation::Down => (selected + 1).min(row_count - 1),
             ServiceNavigation::PageUp => selected.saturating_sub(SERVICE_PAGE_SIZE),
-            ServiceNavigation::PageDown => (selected + SERVICE_PAGE_SIZE).min(service_count - 1),
+            ServiceNavigation::PageDown => (selected + SERVICE_PAGE_SIZE).min(row_count - 1),
             ServiceNavigation::Home => 0,
-            ServiceNavigation::End => service_count - 1,
+            ServiceNavigation::End => row_count - 1,
         };
         self.inner.select(Some(selected));
     }
+
+    fn selected_group_name(&self, groups: &[ResourceGroup]) -> Option<String> {
+        let selected = self.inner.selected()?;
+        match self.visible_rows(groups).get(selected)? {
+            ServiceListRow::Group(group) => Some(group.name.clone()),
+            ServiceListRow::Service(_) => None,
+        }
+    }
+
+    fn toggle_selected_group(&mut self, groups: &[ResourceGroup]) {
+        let Some(group) = self.selected_group_name(groups) else {
+            return;
+        };
+        if !self.collapsed.remove(&group) {
+            self.collapsed.insert(group);
+        }
+        self.sync(groups);
+    }
+
+    fn collapse_selected_group(&mut self, groups: &[ResourceGroup]) {
+        if let Some(group) = self.selected_group_name(groups) {
+            self.collapsed.insert(group);
+            self.sync(groups);
+        }
+    }
+
+    fn expand_selected_group(&mut self, groups: &[ResourceGroup]) {
+        if let Some(group) = self.selected_group_name(groups) {
+            self.collapsed.remove(&group);
+            self.sync(groups);
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyCode, groups: &[ResourceGroup]) -> bool {
+        match key {
+            KeyCode::Up | KeyCode::Char('k') => self.navigate(ServiceNavigation::Up, groups),
+            KeyCode::Down | KeyCode::Char('j') => self.navigate(ServiceNavigation::Down, groups),
+            KeyCode::PageUp => self.navigate(ServiceNavigation::PageUp, groups),
+            KeyCode::PageDown => self.navigate(ServiceNavigation::PageDown, groups),
+            KeyCode::Home => self.navigate(ServiceNavigation::Home, groups),
+            KeyCode::End => self.navigate(ServiceNavigation::End, groups),
+            KeyCode::Enter | KeyCode::Char(' ') => self.toggle_selected_group(groups),
+            KeyCode::Left => self.collapse_selected_group(groups),
+            KeyCode::Right => self.expand_selected_group(groups),
+            _ => return false,
+        }
+        true
+    }
+}
+
+enum ServiceListRow<'a> {
+    Group(&'a ResourceGroup),
+    Service(&'a Service),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +152,7 @@ pub struct DashboardModel {
     pub project: Project,
     pub state_dir: PathBuf,
     pub services: Vec<Service>,
+    pub groups: Vec<ResourceGroup>,
     overall_status: OverallStatus,
     warning: Option<String>,
 }
@@ -108,6 +171,7 @@ impl DashboardModel {
             project,
             state_dir,
             services: Vec::new(),
+            groups: Vec::new(),
             overall_status,
             warning,
         }
@@ -142,6 +206,7 @@ impl DashboardModel {
             && session.phase == SessionPhase::Exited
         {
             self.services.clear();
+            self.groups.clear();
             self.overall_status = if session.exit_code.is_some_and(|code| code != 0) {
                 OverallStatus::Failed
             } else {
@@ -172,6 +237,7 @@ impl DashboardModel {
                 self.overall_status = OverallStatus::Stopped;
                 self.warning = None;
                 self.services.clear();
+                self.groups.clear();
                 return Ok(());
             }
             self.overall_status = OverallStatus::Starting;
@@ -195,6 +261,7 @@ impl DashboardModel {
                 OverallStatus::Stopped
             };
             self.services.clear();
+            self.groups.clear();
             self.warning = Some(if managed {
                 "Tilt API belongs to another Tiltfile or process".to_owned()
             } else {
@@ -224,6 +291,7 @@ impl DashboardModel {
         }
         let snapshot = parse_ui_resources(&String::from_utf8_lossy(&output.stdout))?;
         self.services = snapshot.services;
+        self.groups = snapshot.groups;
         self.warning = snapshot.tiltfile_error;
         self.overall_status = OverallStatus::Running;
         Ok(())
@@ -264,6 +332,7 @@ impl DashboardModel {
         }
         self.overall_status = OverallStatus::Stopped;
         self.services.clear();
+        self.groups.clear();
         self.warning = None;
         Ok(())
     }
@@ -299,7 +368,7 @@ pub fn run_from_env() -> Result<()> {
             }
             last_refresh = Instant::now();
         }
-        service_list.sync(model.services.len());
+        service_list.sync(&model.groups);
         terminal
             .terminal
             .draw(|frame| render(frame, &model, confirm_down, &mut service_list))?;
@@ -313,32 +382,12 @@ pub fn run_from_env() -> Result<()> {
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if service_list.handle_key(key.code, &model.groups) {
+            confirm_down = false;
+            continue;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => break,
-            KeyCode::Up | KeyCode::Char('k') => {
-                confirm_down = false;
-                service_list.navigate(ServiceNavigation::Up, model.services.len());
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                confirm_down = false;
-                service_list.navigate(ServiceNavigation::Down, model.services.len());
-            }
-            KeyCode::PageUp => {
-                confirm_down = false;
-                service_list.navigate(ServiceNavigation::PageUp, model.services.len());
-            }
-            KeyCode::PageDown => {
-                confirm_down = false;
-                service_list.navigate(ServiceNavigation::PageDown, model.services.len());
-            }
-            KeyCode::Home => {
-                confirm_down = false;
-                service_list.navigate(ServiceNavigation::Home, model.services.len());
-            }
-            KeyCode::End => {
-                confirm_down = false;
-                service_list.navigate(ServiceNavigation::End, model.services.len());
-            }
             KeyCode::Char('u') if model.can_start() => {
                 confirm_down = false;
                 if let Err(error) = model.start_with_herdr(&herdr) {
@@ -442,21 +491,40 @@ fn render(
         );
     }
 
-    let items = if model.services.is_empty() {
+    let visible_rows = service_list.visible_rows(&model.groups);
+    let items = if visible_rows.is_empty() {
         vec![ListItem::new(empty_message(model.overall_status()))]
     } else {
-        model
-            .services
+        visible_rows
             .iter()
-            .map(|service| {
-                ListItem::new(Line::from(vec![
-                    Span::styled("● ", Style::default().fg(circle_color(service.status))),
+            .map(|row| match row {
+                ServiceListRow::Group(group) => {
+                    let disclosure = if service_list.collapsed.contains(&group.name) {
+                        "▸ "
+                    } else {
+                        "▾ "
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::raw(disclosure),
+                        Span::styled("● ", Style::default().fg(circle_color(group.status))),
+                        Span::styled(
+                            group.name.clone(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("  {}", group.services.len()),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]))
+                }
+                ServiceListRow::Service(service) => ListItem::new(Line::from(vec![
+                    Span::styled("   ● ", Style::default().fg(circle_color(service.status))),
                     Span::styled(
                         service.name.clone(),
                         Style::default().add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(format!("  {}", service.detail)),
-                ]))
+                ])),
             })
             .collect()
     };
@@ -481,7 +549,7 @@ fn render(
     };
     frame.render_widget(
         Paragraph::new(format!(
-            " ↑/↓ j/k Scroll   {up}   {down}   r Refresh   q Close"
+            " ↑/↓ j/k Move   ↵/Space Toggle   {up}   {down}   r Refresh   q Close"
         ))
         .style(Style::default().fg(Color::DarkGray)),
         chunks[3],
@@ -531,6 +599,28 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
 
+    fn group(name: &str, service: &str) -> crate::tilt::ResourceGroup {
+        crate::tilt::ResourceGroup {
+            name: name.to_owned(),
+            status: CircleStatus::Green,
+            services: vec![Service {
+                name: service.to_owned(),
+                status: CircleStatus::Green,
+                detail: "healthy".to_owned(),
+            }],
+        }
+    }
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
     #[test]
     fn service_list_can_scroll_to_the_last_item_in_a_small_panel() {
         let project = Project {
@@ -539,15 +629,19 @@ mod tests {
         };
         let mut model = DashboardModel::new(project, PathBuf::from("/state"));
         model.overall_status = OverallStatus::Running;
-        model.services = (0..20)
-            .map(|index| Service {
-                name: format!("service-{index}"),
-                status: CircleStatus::Green,
-                detail: "healthy".to_owned(),
-            })
-            .collect();
+        model.groups = vec![ResourceGroup {
+            name: "services".to_owned(),
+            status: CircleStatus::Green,
+            services: (0..20)
+                .map(|index| Service {
+                    name: format!("service-{index}"),
+                    status: CircleStatus::Green,
+                    detail: "healthy".to_owned(),
+                })
+                .collect(),
+        }];
         let mut list_state = ServiceListState::default();
-        list_state.navigate(ServiceNavigation::End, model.services.len());
+        list_state.navigate(ServiceNavigation::End, &model.groups);
         let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
 
         terminal
@@ -567,5 +661,47 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("service-19"));
         assert!(!rendered.contains("service-0 "));
+    }
+
+    #[test]
+    fn collapsed_group_stays_hidden_after_a_dashboard_refresh() {
+        let project = Project {
+            root: PathBuf::from("/project"),
+            tiltfile: Some(PathBuf::from("/project/Tiltfile")),
+        };
+        let mut model = DashboardModel::new(project, PathBuf::from("/state"));
+        model.overall_status = OverallStatus::Running;
+        model.groups = vec![group("apps", "frontend"), group("infra", "postgres")];
+        let mut list_state = ServiceListState::default();
+        list_state.sync(&model.groups);
+        list_state.toggle_selected_group(&model.groups);
+
+        model.groups = vec![group("apps", "frontend"), group("infra", "postgres")];
+        list_state.sync(&model.groups);
+        let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &model, false, &mut list_state))
+            .unwrap();
+        let rendered = buffer_text(&terminal);
+
+        assert!(rendered.contains("apps"));
+        assert!(!rendered.contains("frontend"));
+        assert!(rendered.contains("infra"));
+        assert!(rendered.contains("postgres"));
+    }
+
+    #[test]
+    fn group_keys_collapse_expand_and_toggle_the_selected_header() {
+        let groups = vec![group("apps", "frontend")];
+        let mut list_state = ServiceListState::default();
+        list_state.sync(&groups);
+
+        assert!(list_state.handle_key(KeyCode::Left, &groups));
+        assert_eq!(list_state.visible_rows(&groups).len(), 1);
+        assert!(list_state.handle_key(KeyCode::Right, &groups));
+        assert_eq!(list_state.visible_rows(&groups).len(), 2);
+        assert!(list_state.handle_key(KeyCode::Char(' '), &groups));
+        assert_eq!(list_state.visible_rows(&groups).len(), 1);
+        assert!(!list_state.handle_key(KeyCode::Char('u'), &groups));
     }
 }

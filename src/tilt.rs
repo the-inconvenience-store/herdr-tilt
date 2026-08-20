@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,9 +19,17 @@ pub struct Service {
     pub detail: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceGroup {
+    pub name: String,
+    pub status: CircleStatus,
+    pub services: Vec<Service>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DashboardSnapshot {
     pub services: Vec<Service>,
+    pub groups: Vec<ResourceGroup>,
     pub tiltfile_error: Option<String>,
 }
 
@@ -47,6 +56,8 @@ struct UIResource {
 #[derive(Deserialize)]
 struct Metadata {
     name: String,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -110,6 +121,8 @@ struct SessionStatus {
 pub fn parse_ui_resources(json: &str) -> Result<DashboardSnapshot> {
     let list: UIResourceList = serde_json::from_str(json).context("parse Tilt UIResource list")?;
     let mut ordered = Vec::new();
+    let mut grouped = BTreeMap::<String, Vec<(i32, Service)>>::new();
+    let mut ungrouped = Vec::new();
     let mut tiltfile_error = None;
 
     for resource in list.items {
@@ -119,14 +132,23 @@ pub fn parse_ui_resources(json: &str) -> Result<DashboardSnapshot> {
         }
         let status = circle_status(&resource.status);
         let detail = status_detail(&resource.status).to_owned();
-        ordered.push((
-            resource.status.order,
-            Service {
-                name: resource.metadata.name,
-                status,
-                detail,
-            },
-        ));
+        let service = Service {
+            name: resource.metadata.name,
+            status,
+            detail,
+        };
+        let order = resource.status.order;
+        if resource.metadata.labels.is_empty() {
+            ungrouped.push((order, service.clone()));
+        } else {
+            for label in resource.metadata.labels.into_keys() {
+                grouped
+                    .entry(label)
+                    .or_default()
+                    .push((order, service.clone()));
+            }
+        }
+        ordered.push((order, service));
     }
     ordered.sort_by(|left, right| {
         left.0
@@ -134,10 +156,68 @@ pub fn parse_ui_resources(json: &str) -> Result<DashboardSnapshot> {
             .then_with(|| left.1.name.cmp(&right.1.name))
     });
 
+    let mut groups = grouped
+        .into_iter()
+        .map(|(name, mut services)| {
+            sort_services(&mut services);
+            let services = services
+                .into_iter()
+                .map(|(_, service)| service)
+                .collect::<Vec<_>>();
+            ResourceGroup {
+                name,
+                status: aggregate_status(&services),
+                services,
+            }
+        })
+        .collect::<Vec<_>>();
+    if !ungrouped.is_empty() {
+        sort_services(&mut ungrouped);
+        let services = ungrouped
+            .into_iter()
+            .map(|(_, service)| service)
+            .collect::<Vec<_>>();
+        groups.push(ResourceGroup {
+            name: "Ungrouped".to_owned(),
+            status: aggregate_status(&services),
+            services,
+        });
+    }
+
     Ok(DashboardSnapshot {
         services: ordered.into_iter().map(|(_, service)| service).collect(),
+        groups,
         tiltfile_error,
     })
+}
+
+fn aggregate_status(services: &[Service]) -> CircleStatus {
+    if services
+        .iter()
+        .any(|service| service.status == CircleStatus::Red)
+    {
+        CircleStatus::Red
+    } else if services
+        .iter()
+        .any(|service| service.status == CircleStatus::Orange)
+    {
+        CircleStatus::Orange
+    } else if services
+        .iter()
+        .any(|service| service.status == CircleStatus::Green)
+    {
+        CircleStatus::Green
+    } else {
+        CircleStatus::Grey
+    }
+}
+
+fn sort_services(services: &mut [(i32, Service)]) {
+    services.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.name.cmp(&right.1.name))
+    });
 }
 
 pub fn parse_session_identity(json: &str) -> Result<SessionIdentity> {
