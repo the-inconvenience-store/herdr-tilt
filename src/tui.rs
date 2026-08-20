@@ -524,14 +524,9 @@ struct LogView {
 }
 
 impl LogView {
-    fn open(
-        tilt: impl AsRef<std::ffi::OsStr>,
-        kubectl: impl AsRef<std::ffi::OsStr>,
-        service_name: String,
-        port: u16,
-    ) -> Result<Self> {
+    fn open(tilt: impl AsRef<std::ffi::OsStr>, service_name: String, port: u16) -> Result<Self> {
         Ok(Self {
-            stream: TiltLogStream::spawn_with_kubectl(tilt, kubectl, &service_name, port)?,
+            stream: TiltLogStream::spawn(tilt, &service_name, port)?,
             service_name,
             buffer: LogBuffer::default(),
             running: true,
@@ -553,7 +548,6 @@ pub fn run_from_env() -> Result<()> {
         .map(PathBuf::from)
         .context("HERDR_PLUGIN_STATE_DIR is not set")?;
     let tilt = env::var("TILT_BIN_PATH").unwrap_or_else(|_| "tilt".to_owned());
-    let kubectl = env::var("KUBECTL_BIN_PATH").unwrap_or_else(|_| "kubectl".to_owned());
     let herdr = env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_owned());
     let binary = env::current_exe().context("resolve herdr-tilt executable")?;
     let mut model = DashboardModel::new(project, state_dir);
@@ -683,8 +677,7 @@ pub fn run_from_env() -> Result<()> {
                     model.toggle_service_with_tilt(&tilt, &service)
                 }
                 SelectedServiceAction::Logs => {
-                    match LogView::open(&tilt, &kubectl, service.name.clone(), model.active_port())
-                    {
+                    match LogView::open(&tilt, service.name.clone(), model.active_port()) {
                         Ok(view) => log_view = Some(view),
                         Err(error) => model.set_warning(error.to_string()),
                     }
@@ -818,11 +811,7 @@ fn render_logs(frame: &mut ratatui::Frame<'_>, view: &LogView) {
     } else {
         "nowrap"
     };
-    let source_label = if view.stream.kubernetes_stream_count() == 0 {
-        "tilt".to_owned()
-    } else {
-        format!("tilt+{} k8s", view.stream.kubernetes_stream_count())
-    };
+    let source_label = "tilt+app";
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(source_label, Style::default().fg(Color::DarkGray)),
@@ -1997,6 +1986,7 @@ mod tests {
             .any(|cell| cell.symbol() == "E" && cell.fg == Color::Red);
 
         assert!(rendered.contains("api logs"));
+        assert!(rendered.contains("tilt+app"));
         assert!(rendered.contains(r#""level": "warn""#));
         assert!(rendered.contains("f follow"));
         assert!(rendered.contains("w wrap"));
