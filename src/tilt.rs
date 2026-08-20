@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CircleStatus {
@@ -21,6 +22,13 @@ pub struct Service {
 pub struct DashboardSnapshot {
     pub services: Vec<Service>,
     pub tiltfile_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionIdentity {
+    pub tiltfile: PathBuf,
+    pub pid: u32,
+    pub start_time: String,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +82,31 @@ struct BuildRecord {
     warnings: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct SessionList {
+    #[serde(default)]
+    items: Vec<TiltSession>,
+}
+
+#[derive(Deserialize)]
+struct TiltSession {
+    spec: SessionSpec,
+    status: SessionStatus,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionSpec {
+    tiltfile_path: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionStatus {
+    pid: u32,
+    start_time: String,
+}
+
 pub fn parse_ui_resources(json: &str) -> Result<DashboardSnapshot> {
     let list: UIResourceList = serde_json::from_str(json).context("parse Tilt UIResource list")?;
     let mut ordered = Vec::new();
@@ -104,6 +137,20 @@ pub fn parse_ui_resources(json: &str) -> Result<DashboardSnapshot> {
     Ok(DashboardSnapshot {
         services: ordered.into_iter().map(|(_, service)| service).collect(),
         tiltfile_error,
+    })
+}
+
+pub fn parse_session_identity(json: &str) -> Result<SessionIdentity> {
+    let list: SessionList = serde_json::from_str(json).context("parse Tilt Session list")?;
+    let session = list
+        .items
+        .into_iter()
+        .next()
+        .context("Tilt API returned no Session")?;
+    Ok(SessionIdentity {
+        tiltfile: session.spec.tiltfile_path,
+        pid: session.status.pid,
+        start_time: session.status.start_time,
     })
 }
 

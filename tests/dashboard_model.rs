@@ -57,9 +57,16 @@ fn running_dashboard_refreshes_services_from_tilt() {
     let fake_tilt = workspace.path().join("tilt");
     fs::write(
         &fake_tilt,
-        r#"#!/bin/sh
-printf '%s\n' '{"items":[{"metadata":{"name":"api"},"status":{"order":1,"updateStatus":"ok","runtimeStatus":"ok"}}]}'
+        format!(
+            r#"#!/bin/sh
+if [ "$2" = "sessions" ]; then
+  printf '%s\n' '{{"items":[{{"spec":{{"tiltfilePath":"{}"}},"status":{{"pid":101,"startTime":"2026-08-20T01:02:03Z"}}}}]}}'
+else
+  printf '%s\n' '{{"items":[{{"metadata":{{"name":"api"}},"status":{{"order":1,"updateStatus":"ok","runtimeStatus":"ok"}}}}]}}'
+fi
 "#,
+            project.tiltfile.as_ref().unwrap().display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
@@ -72,6 +79,56 @@ printf '%s\n' '{"items":[{"metadata":{"name":"api"},"status":{"order":1,"updateS
     assert_eq!(model.services[0].name, "api");
     assert_eq!(model.services[0].status, CircleStatus::Green);
     assert!(model.can_stop());
+}
+
+#[test]
+fn dashboard_rejects_a_tilt_api_for_another_project() {
+    let workspace = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let tiltfile = workspace.path().join("Tiltfile");
+    fs::write(&tiltfile, "").unwrap();
+    let tiltfile = tiltfile.canonicalize().unwrap();
+    let project = Project {
+        root: workspace.path().canonicalize().unwrap(),
+        tiltfile: Some(tiltfile.clone()),
+    };
+    let path = record_path(state.path(), &tiltfile);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        serde_json::to_vec(&SessionRecord {
+            tiltfile,
+            project_root: project.root.clone(),
+            port: 41234,
+            runner_pid: 100,
+            tilt_pid: 101,
+            started_unix_ms: 1234,
+            phase: SessionPhase::Running,
+            exit_code: None,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let fake_tilt = workspace.path().join("tilt");
+    fs::write(
+        &fake_tilt,
+        r#"#!/bin/sh
+if [ "$2" = "sessions" ]; then
+  printf '%s\n' '{"items":[{"spec":{"tiltfilePath":"/another/project/Tiltfile"},"status":{"pid":999,"startTime":"2026-08-20T01:02:03Z"}}]}'
+else
+  printf '%s\n' '{"items":[{"metadata":{"name":"wrong-project"},"status":{"updateStatus":"ok","runtimeStatus":"ok"}}]}'
+fi
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut model = DashboardModel::new(project, state.path().to_path_buf());
+    let error = model.refresh_with_tilt(&fake_tilt).unwrap_err();
+
+    assert!(error.to_string().contains("another Tiltfile"));
+    assert!(model.services.is_empty());
+    assert_eq!(model.overall_status(), OverallStatus::Failed);
 }
 
 #[test]

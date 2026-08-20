@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::project::Project;
 use crate::project::{InvocationContext, resolve_project};
 use crate::session::{SessionPhase, load_session};
-use crate::tilt::{CircleStatus, Service, parse_ui_resources};
+use crate::tilt::{CircleStatus, Service, parse_session_identity, parse_ui_resources};
 use anyhow::{Context, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -99,6 +99,37 @@ impl DashboardModel {
                 .filter(|code| *code != 0)
                 .map(|code| format!("Tilt exited with status {code}"));
             return Ok(());
+        }
+
+        let identity_output = Command::new(&tilt)
+            .args([
+                "get",
+                "sessions",
+                "-o",
+                "json",
+                "--port",
+                &session.port.to_string(),
+            ])
+            .output()
+            .context("query Tilt Session")?;
+        if !identity_output.status.success() {
+            self.overall_status = OverallStatus::Starting;
+            self.warning = Some("Waiting for the Tilt API".to_owned());
+            bail!(
+                "Tilt API is not ready: {}",
+                String::from_utf8_lossy(&identity_output.stderr).trim()
+            );
+        }
+        let identity = parse_session_identity(&String::from_utf8_lossy(&identity_output.stdout))?;
+        let reported_tiltfile = identity
+            .tiltfile
+            .canonicalize()
+            .unwrap_or(identity.tiltfile);
+        if reported_tiltfile != session.tiltfile || identity.pid != session.tilt_pid {
+            self.overall_status = OverallStatus::Failed;
+            self.services.clear();
+            self.warning = Some("Tilt API belongs to another Tiltfile or process".to_owned());
+            bail!("Tilt API port belongs to another Tiltfile or process");
         }
 
         let output = Command::new(tilt)
