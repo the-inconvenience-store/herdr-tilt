@@ -58,6 +58,14 @@ fn down_confirmation_decision(key: KeyCode) -> Option<DownConfirmationDecision> 
     }
 }
 
+fn toggle_help_for_key(key: KeyCode, show_help: &mut bool) -> bool {
+    if key != KeyCode::Char('?') {
+        return false;
+    }
+    *show_help = !*show_help;
+    true
+}
+
 #[derive(Debug, Default)]
 struct ServiceListState {
     inner: ListState,
@@ -446,6 +454,7 @@ pub fn run_from_env() -> Result<()> {
     let mut terminal = TerminalGuard::enter()?;
     let mut last_refresh = Instant::now() - Duration::from_secs(2);
     let mut confirm_down = false;
+    let mut show_help = false;
     let mut service_list = ServiceListState::default();
 
     loop {
@@ -460,7 +469,7 @@ pub fn run_from_env() -> Result<()> {
         service_list.sync(&model.groups);
         terminal
             .terminal
-            .draw(|frame| render(frame, &model, confirm_down, &mut service_list))?;
+            .draw(|frame| render(frame, &model, confirm_down, show_help, &mut service_list))?;
 
         if !event::poll(Duration::from_millis(100))? {
             continue;
@@ -483,6 +492,9 @@ pub fn run_from_env() -> Result<()> {
                 Some(DownConfirmationDecision::Cancel) => confirm_down = false,
                 None => {}
             }
+            continue;
+        }
+        if toggle_help_for_key(key.code, &mut show_help) {
             continue;
         }
         if service_list.handle_key(key.code, &model.groups) {
@@ -555,6 +567,7 @@ fn render(
     frame: &mut ratatui::Frame<'_>,
     model: &DashboardModel,
     confirm_down: bool,
+    show_help: bool,
     service_list: &mut ServiceListState,
 ) {
     let has_banner = model.warning().is_some();
@@ -565,7 +578,7 @@ fn render(
     let footer_lines = if confirm_down {
         down_confirmation_footer(frame.area().width)
     } else {
-        shortcut_legend(model, frame.area().width)
+        shortcut_legend(model, frame.area().width, show_help)
     };
     let footer_height = u16::try_from(footer_lines.len()).unwrap_or(u16::MAX).max(1);
     let chunks = Layout::default()
@@ -720,20 +733,35 @@ fn service_metric_lines(model: &DashboardModel, width: u16) -> Vec<Line<'static>
     lines
 }
 
-fn shortcut_legend(model: &DashboardModel, width: u16) -> Vec<Line<'static>> {
+fn shortcut_legend(model: &DashboardModel, width: u16, show_help: bool) -> Vec<Line<'static>> {
     let navigation_enabled = !model.groups.is_empty();
-    let entries = [
-        ("↑/↓", "nav", navigation_enabled),
-        ("pg↑/pg↓", "page", navigation_enabled),
-        ("home/end", "jump", navigation_enabled),
-        ("↵/space", "toggle", navigation_enabled),
-        ("t", "trigger", navigation_enabled),
-        ("e", "enable/disable", navigation_enabled),
-        ("u", "up", model.can_start()),
-        ("d", "down", model.can_stop()),
-        ("r", "refresh", true),
-        ("q", "close", true),
-    ];
+    let entries = if show_help {
+        vec![
+            ("↑/↓/j/k", "nav", navigation_enabled),
+            ("pg↑/pg↓", "page", navigation_enabled),
+            ("home/end", "jump", navigation_enabled),
+            ("↵/space", "toggle", navigation_enabled),
+            ("t", "trigger", navigation_enabled),
+            ("e", "enable/disable", navigation_enabled),
+            ("u", "up", model.can_start()),
+            ("d", "down", model.can_stop()),
+            ("r", "refresh", true),
+            ("?", "help", true),
+            ("q/esc", "close", true),
+        ]
+    } else {
+        vec![
+            ("↑/↓", "nav", navigation_enabled),
+            ("↵/space", "toggle", navigation_enabled),
+            ("t", "trigger", navigation_enabled),
+            ("e", "enable/disable", navigation_enabled),
+            ("u", "up", model.can_start()),
+            ("d", "down", model.can_stop()),
+            ("r", "refresh", true),
+            ("?", "help", true),
+            ("q", "close", true),
+        ]
+    };
     let separator = Span::styled(" │ ", Style::default().fg(Color::Rgb(72, 72, 72)));
     let mut lines = Vec::new();
     let mut spans = Vec::new();
@@ -908,7 +936,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
 
         terminal
-            .draw(|frame| render(frame, &model, false, &mut list_state))
+            .draw(|frame| render(frame, &model, false, false, &mut list_state))
             .unwrap();
 
         let rendered = terminal.backend().buffer().content().to_vec();
@@ -943,7 +971,7 @@ mod tests {
         list_state.sync(&model.groups);
         let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
         terminal
-            .draw(|frame| render(frame, &model, false, &mut list_state))
+            .draw(|frame| render(frame, &model, false, false, &mut list_state))
             .unwrap();
         let rendered = buffer_text(&terminal);
 
@@ -968,7 +996,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
 
         terminal
-            .draw(|frame| render(frame, &model, false, &mut list_state))
+            .draw(|frame| render(frame, &model, false, false, &mut list_state))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let group_row = (0..100)
@@ -1044,7 +1072,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(38, 18)).unwrap();
 
         terminal
-            .draw(|frame| render(frame, &model, false, &mut list_state))
+            .draw(|frame| render(frame, &model, false, false, &mut list_state))
             .unwrap();
         let rendered = buffer_text(&terminal);
 
@@ -1056,13 +1084,64 @@ mod tests {
             "u up",
             "d down",
             "r refresh",
+            "? help",
             "q close",
         ] {
             assert!(rendered.contains(shortcut), "missing shortcut: {shortcut}");
         }
         assert!(!rendered.contains("← collapse"));
         assert!(!rendered.contains("→ expand"));
+        assert!(!rendered.contains("pg↑/pg↓ page"));
+        assert!(!rendered.contains("home/end jump"));
         assert!(rendered.contains("frontend"));
+    }
+
+    #[test]
+    fn help_footer_shows_all_keybinds_in_a_narrow_panel() {
+        let project = Project {
+            root: PathBuf::from("/project"),
+            tiltfile: Some(PathBuf::from("/project/Tiltfile")),
+        };
+        let mut model = DashboardModel::new(project, PathBuf::from("/state"));
+        model.overall_status = OverallStatus::Running;
+        model.groups = vec![group("apps", "frontend")];
+        model.services = model.groups[0].services.clone();
+        let mut list_state = ServiceListState::default();
+        list_state.sync(&model.groups);
+        let mut terminal = Terminal::new(TestBackend::new(38, 22)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &model, false, true, &mut list_state))
+            .unwrap();
+        let rendered = buffer_text(&terminal);
+
+        for shortcut in [
+            "↑/↓/j/k nav",
+            "pg↑/pg↓ page",
+            "home/end jump",
+            "↵/space toggle",
+            "t trigger",
+            "e enable/disable",
+            "u up",
+            "d down",
+            "r refresh",
+            "? help",
+            "q/esc close",
+        ] {
+            assert!(rendered.contains(shortcut), "missing shortcut: {shortcut}");
+        }
+        assert!(rendered.contains("frontend"));
+    }
+
+    #[test]
+    fn question_mark_toggles_help_visibility() {
+        let mut show_help = false;
+
+        assert!(toggle_help_for_key(KeyCode::Char('?'), &mut show_help));
+        assert!(show_help);
+        assert!(toggle_help_for_key(KeyCode::Char('?'), &mut show_help));
+        assert!(!show_help);
+        assert!(!toggle_help_for_key(KeyCode::Char('t'), &mut show_help));
     }
 
     #[test]
@@ -1080,7 +1159,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
 
         terminal
-            .draw(|frame| render(frame, &model, true, &mut list_state))
+            .draw(|frame| render(frame, &model, true, false, &mut list_state))
             .unwrap();
         let rendered = buffer_text(&terminal);
 
@@ -1137,7 +1216,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
 
         terminal
-            .draw(|frame| render(frame, &model, false, &mut list_state))
+            .draw(|frame| render(frame, &model, false, false, &mut list_state))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let rendered = buffer_text(&terminal);
@@ -1191,7 +1270,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(38, 18)).unwrap();
 
         terminal
-            .draw(|frame| render(frame, &model, false, &mut list_state))
+            .draw(|frame| render(frame, &model, false, false, &mut list_state))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let first_row = (0..38).map(|x| buffer[(x, 0)].symbol()).collect::<String>();

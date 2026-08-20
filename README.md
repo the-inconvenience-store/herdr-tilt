@@ -64,6 +64,7 @@ opens a right-hand split when no dashboard exists.
 | `d`, then `y` | Confirm, stop Tilt, and run `tilt down` |
 | `n` | Cancel a pending Down confirmation |
 | `r` | Refresh immediately |
+| `?` | Show or hide all dashboard keybinds |
 | `q` or `Esc` | Close the dashboard without stopping Tilt |
 
 The dashboard opens even when the workspace has no `Tiltfile`, but displays a
