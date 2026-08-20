@@ -21,6 +21,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
+const DEFAULT_TILT_PORT: u16 = 10350;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverallStatus {
     Unavailable,
@@ -79,15 +81,13 @@ impl DashboardModel {
     }
 
     pub fn refresh_with_tilt(&mut self, tilt: impl AsRef<std::ffi::OsStr>) -> Result<()> {
-        let Some(session) = load_session(&self.project, &self.state_dir) else {
-            if self.project.tiltfile.is_some() {
-                self.overall_status = OverallStatus::Stopped;
-                self.warning = None;
-                self.services.clear();
-            }
+        let Some(project_tiltfile) = self.project.tiltfile.as_ref() else {
             return Ok(());
         };
-        if session.phase == SessionPhase::Exited {
+        let session = load_session(&self.project, &self.state_dir);
+        if let Some(session) = session.as_ref()
+            && session.phase == SessionPhase::Exited
+        {
             self.services.clear();
             self.overall_status = if session.exit_code.is_some_and(|code| code != 0) {
                 OverallStatus::Failed
@@ -101,18 +101,26 @@ impl DashboardModel {
             return Ok(());
         }
 
+        let (port, expected_pid, managed) = session
+            .as_ref()
+            .map_or((DEFAULT_TILT_PORT, None, false), |session| {
+                (session.port, Some(session.tilt_pid), true)
+            });
+        let expected_tiltfile = session
+            .as_ref()
+            .map_or(project_tiltfile, |session| &session.tiltfile);
+
         let identity_output = Command::new(&tilt)
-            .args([
-                "get",
-                "sessions",
-                "-o",
-                "json",
-                "--port",
-                &session.port.to_string(),
-            ])
+            .args(["get", "sessions", "-o", "json", "--port", &port.to_string()])
             .output()
             .context("query Tilt Session")?;
         if !identity_output.status.success() {
+            if !managed {
+                self.overall_status = OverallStatus::Stopped;
+                self.warning = None;
+                self.services.clear();
+                return Ok(());
+            }
             self.overall_status = OverallStatus::Starting;
             self.warning = Some("Waiting for the Tilt API".to_owned());
             bail!(
@@ -125,10 +133,20 @@ impl DashboardModel {
             .tiltfile
             .canonicalize()
             .unwrap_or(identity.tiltfile);
-        if reported_tiltfile != session.tiltfile || identity.pid != session.tilt_pid {
-            self.overall_status = OverallStatus::Failed;
+        if reported_tiltfile != *expected_tiltfile
+            || expected_pid.is_some_and(|pid| identity.pid != pid)
+        {
+            self.overall_status = if managed {
+                OverallStatus::Failed
+            } else {
+                OverallStatus::Stopped
+            };
             self.services.clear();
-            self.warning = Some("Tilt API belongs to another Tiltfile or process".to_owned());
+            self.warning = Some(if managed {
+                "Tilt API belongs to another Tiltfile or process".to_owned()
+            } else {
+                "Tilt's default port belongs to another workspace".to_owned()
+            });
             bail!("Tilt API port belongs to another Tiltfile or process");
         }
 
@@ -139,7 +157,7 @@ impl DashboardModel {
                 "-o",
                 "json",
                 "--port",
-                &session.port.to_string(),
+                &port.to_string(),
             ])
             .output()
             .context("query Tilt UIResources")?;

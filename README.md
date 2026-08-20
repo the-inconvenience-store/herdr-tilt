@@ -96,7 +96,10 @@ herdr plugin log list --plugin herdr.tilt
 ## Current scope
 
 - Plugin-started Tilt sessions are managed automatically.
-- A manually started Tilt on an arbitrary port is not auto-discovered.
+- A manually started Tilt on the default port (`10350`) is discovered after
+  its API-reported Tiltfile is verified against the current workspace.
+- A manually started Tilt on an arbitrary non-default port is not
+  auto-discovered.
 - Tiltfile arguments and custom `tilt down` flags are not yet configurable.
 - Windows is not yet supported because retained process signaling needs a
   platform-specific implementation.

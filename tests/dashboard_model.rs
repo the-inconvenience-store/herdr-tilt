@@ -82,6 +82,66 @@ fi
 }
 
 #[test]
+fn dashboard_discovers_manually_started_tilt_on_the_default_port() {
+    let workspace = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let tiltfile = workspace.path().join("Tiltfile");
+    fs::write(&tiltfile, "").unwrap();
+    let project = Project {
+        root: workspace.path().canonicalize().unwrap(),
+        tiltfile: Some(tiltfile.canonicalize().unwrap()),
+    };
+    let fake_tilt = workspace.path().join("tilt");
+    fs::write(
+        &fake_tilt,
+        format!(
+            r#"#!/bin/sh
+if [ "$5" != "--port" ] || [ "$6" != "10350" ]; then
+  exit 9
+fi
+if [ "$2" = "sessions" ]; then
+  printf '%s\n' '{{"items":[{{"spec":{{"tiltfilePath":"{}"}},"status":{{"pid":321,"startTime":"2026-08-20T01:02:03Z"}}}}]}}'
+else
+  printf '%s\n' '{{"items":[{{"metadata":{{"name":"manual-api"}},"status":{{"order":1,"updateStatus":"ok","runtimeStatus":"ok"}}}}]}}'
+fi
+"#,
+            project.tiltfile.as_ref().unwrap().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut model = DashboardModel::new(project, state.path().to_path_buf());
+    model.refresh_with_tilt(&fake_tilt).unwrap();
+
+    assert_eq!(model.overall_status(), OverallStatus::Running);
+    assert_eq!(model.services.len(), 1);
+    assert_eq!(model.services[0].name, "manual-api");
+}
+
+#[test]
+fn dashboard_without_a_default_tilt_api_remains_stopped() {
+    let workspace = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let tiltfile = workspace.path().join("Tiltfile");
+    fs::write(&tiltfile, "").unwrap();
+    let project = Project {
+        root: workspace.path().canonicalize().unwrap(),
+        tiltfile: Some(tiltfile.canonicalize().unwrap()),
+    };
+    let fake_tilt = workspace.path().join("tilt");
+    fs::write(&fake_tilt, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut model = DashboardModel::new(project, state.path().to_path_buf());
+    model.refresh_with_tilt(&fake_tilt).unwrap();
+
+    assert_eq!(model.overall_status(), OverallStatus::Stopped);
+    assert!(model.services.is_empty());
+    assert_eq!(model.warning(), None);
+}
+
+#[test]
 fn dashboard_rejects_a_tilt_api_for_another_project() {
     let workspace = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
