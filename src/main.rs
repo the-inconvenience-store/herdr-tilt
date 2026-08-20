@@ -16,12 +16,15 @@ enum Commands {
     Tui,
     /// Run a retained Tilt session.
     Run,
+    /// Stop Tilt and clean up resources from the current Tiltfile.
+    Down,
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command {
         Commands::Open => herdr_tilt::open::open_panel_from_env(),
         Commands::Run => herdr_tilt::session::run_from_env(),
+        Commands::Down => herdr_tilt::session::down_from_env(),
         Commands::Tui => Ok(()),
     }
 }

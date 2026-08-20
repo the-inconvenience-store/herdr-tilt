@@ -3,10 +3,14 @@ use std::fs::{self, File, OpenOptions};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -41,6 +45,17 @@ pub fn run_from_env() -> Result<()> {
         .map(PathBuf::from)
         .context("HERDR_PLUGIN_STATE_DIR is not set")?;
     run_project(&project, &state_dir)
+}
+
+pub fn down_from_env() -> Result<()> {
+    let context_json =
+        env::var("HERDR_PLUGIN_CONTEXT_JSON").context("HERDR_PLUGIN_CONTEXT_JSON is not set")?;
+    let context = InvocationContext::from_json(&context_json)?;
+    let project = resolve_project(&context)?;
+    let state_dir = env::var("HERDR_PLUGIN_STATE_DIR")
+        .map(PathBuf::from)
+        .context("HERDR_PLUGIN_STATE_DIR is not set")?;
+    down_project(&project, &state_dir)
 }
 
 pub fn load_session(project: &Project, state_dir: &Path) -> Option<SessionRecord> {
@@ -108,6 +123,72 @@ fn run_project(project: &Project, state_dir: &Path) -> Result<()> {
     record.exit_code = status.code();
     write_record(&path, &record)?;
     Ok(())
+}
+
+fn down_project(project: &Project, state_dir: &Path) -> Result<()> {
+    let tiltfile = project
+        .tiltfile
+        .as_ref()
+        .context("No Tiltfile found in this workspace")?;
+    let key = project_key(tiltfile);
+    let lock_path = state_dir.join("sessions").join(format!("{key}.lock"));
+    let record_path = session_path(state_dir, tiltfile);
+
+    if project_lock_is_held(&lock_path)?
+        && let Some(record) = load_session(project, state_dir)
+        && record.phase == SessionPhase::Running
+    {
+        let pid = i32::try_from(record.tilt_pid).context("Tilt PID is out of range")?;
+        kill(Pid::from_raw(pid), Signal::SIGTERM).context("signal retained Tilt process")?;
+        wait_for_runner_exit(project, state_dir)?;
+    }
+
+    let tilt = env::var("TILT_BIN_PATH").unwrap_or_else(|_| "tilt".to_owned());
+    let output = Command::new(&tilt)
+        .args(["down", "-f", &tiltfile.display().to_string()])
+        .current_dir(&project.root)
+        .output()
+        .with_context(|| format!("run {tilt} down"))?;
+    if !output.status.success() {
+        bail!(
+            "Tilt down failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    if record_path.exists() {
+        fs::remove_file(record_path).context("clear stopped Tilt session state")?;
+    }
+    Ok(())
+}
+
+fn project_lock_is_held(path: &Path) -> Result<bool> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .context("open project session lock")?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {
+            lock.unlock().context("unlock project session")?;
+            Ok(false)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+        Err(error) => Err(error).context("check project session lock"),
+    }
+}
+
+fn wait_for_runner_exit(project: &Project, state_dir: &Path) -> Result<()> {
+    for _ in 0..100 {
+        if load_session(project, state_dir)
+            .is_none_or(|record| record.phase != SessionPhase::Running)
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    bail!("Timed out waiting for retained Tilt process to stop")
 }
 
 fn available_port() -> Result<u16> {
