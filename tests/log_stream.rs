@@ -77,7 +77,7 @@ fn tilt_log_stream_bounds_a_single_unterminated_record_while_reading() {
     let mut logs = LogBuffer::with_limits(10, 20_000);
     let deadline = Instant::now() + Duration::from_secs(2);
 
-    while logs.is_empty() && Instant::now() < deadline {
+    while logs.len() < 2 && Instant::now() < deadline {
         stream.poll_into(&mut logs, 32);
         thread::sleep(Duration::from_millis(10));
     }
