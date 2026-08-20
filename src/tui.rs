@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use crate::logs::{LogBuffer, LogNavigation, TiltLogStream};
 use crate::project::Project;
 use crate::project::{InvocationContext, resolve_project};
 use crate::session::{SessionPhase, load_session};
@@ -42,6 +43,7 @@ enum ServiceNavigation {
 enum SelectedServiceAction {
     Trigger,
     ToggleEnabled,
+    Logs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +154,7 @@ impl ServiceListState {
         let action = match key {
             KeyCode::Char('t') => SelectedServiceAction::Trigger,
             KeyCode::Char('e') => SelectedServiceAction::ToggleEnabled,
+            KeyCode::Char('l') => SelectedServiceAction::Logs,
             _ => return None,
         };
         let selected = self.inner.selected()?;
@@ -228,6 +231,12 @@ impl DashboardModel {
                 self.overall_status,
                 OverallStatus::Starting | OverallStatus::Running | OverallStatus::Failed
             )
+    }
+
+    fn active_port(&self) -> u16 {
+        load_session(&self.project, &self.state_dir)
+            .filter(|session| session.phase == SessionPhase::Running)
+            .map_or(DEFAULT_TILT_PORT, |session| session.port)
     }
 
     pub fn refresh_with_tilt(&mut self, tilt: impl AsRef<std::ffi::OsStr>) -> Result<()> {
@@ -383,9 +392,7 @@ impl DashboardModel {
         {
             bail!("Tilt service cannot be triggered in the current dashboard state");
         }
-        let port = load_session(&self.project, &self.state_dir)
-            .filter(|session| session.phase == SessionPhase::Running)
-            .map_or(DEFAULT_TILT_PORT, |session| session.port);
+        let port = self.active_port();
         let output = Command::new(tilt)
             .args(["trigger", service_name, "--port", &port.to_string()])
             .output()
@@ -417,9 +424,7 @@ impl DashboardModel {
         } else {
             "disable"
         };
-        let port = load_session(&self.project, &self.state_dir)
-            .filter(|session| session.phase == SessionPhase::Running)
-            .map_or(DEFAULT_TILT_PORT, |session| session.port);
+        let port = self.active_port();
         let output = Command::new(tilt)
             .args([action, &service.name, "--port", &port.to_string()])
             .output()
@@ -436,6 +441,29 @@ impl DashboardModel {
 
     fn set_warning(&mut self, warning: impl Into<String>) {
         self.warning = Some(warning.into());
+    }
+}
+
+struct LogView {
+    service_name: String,
+    buffer: LogBuffer,
+    stream: TiltLogStream,
+    running: bool,
+}
+
+impl LogView {
+    fn open(tilt: impl AsRef<std::ffi::OsStr>, service_name: String, port: u16) -> Result<Self> {
+        Ok(Self {
+            stream: TiltLogStream::spawn(tilt, &service_name, port)?,
+            service_name,
+            buffer: LogBuffer::default(),
+            running: true,
+        })
+    }
+
+    fn poll(&mut self) {
+        self.stream.poll_into(&mut self.buffer, 256);
+        self.running = self.stream.is_running();
     }
 }
 
@@ -456,8 +484,28 @@ pub fn run_from_env() -> Result<()> {
     let mut confirm_down = false;
     let mut show_help = false;
     let mut service_list = ServiceListState::default();
+    let mut log_view: Option<LogView> = None;
 
     loop {
+        if let Some(view) = log_view.as_mut() {
+            view.poll();
+            terminal.terminal.draw(|frame| render_logs(frame, view))?;
+            if !event::poll(Duration::from_millis(100))? {
+                continue;
+            }
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            let page_size = usize::from(terminal.terminal.size()?.height.saturating_sub(3).max(1));
+            if handle_log_key(&mut view.buffer, key.code, page_size) {
+                log_view = None;
+                last_refresh = Instant::now() - Duration::from_secs(2);
+            }
+            continue;
+        }
         if last_refresh.elapsed() >= Duration::from_secs(1) {
             if let Err(error) = model.refresh_with_tilt(&tilt)
                 && model.overall_status() != OverallStatus::Starting
@@ -512,6 +560,13 @@ pub fn run_from_env() -> Result<()> {
                 SelectedServiceAction::ToggleEnabled => {
                     model.toggle_service_with_tilt(&tilt, &service)
                 }
+                SelectedServiceAction::Logs => {
+                    match LogView::open(&tilt, service.name.clone(), model.active_port()) {
+                        Ok(view) => log_view = Some(view),
+                        Err(error) => model.set_warning(error.to_string()),
+                    }
+                    continue;
+                }
             };
             if let Err(error) = result {
                 model.set_warning(error.to_string());
@@ -561,6 +616,232 @@ impl Drop for TerminalGuard {
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
     }
+}
+
+fn handle_log_key(buffer: &mut LogBuffer, key: KeyCode, page_size: usize) -> bool {
+    match key {
+        KeyCode::Char('q') | KeyCode::Esc => return true,
+        KeyCode::Up | KeyCode::Char('k') => buffer.navigate(LogNavigation::Up, page_size),
+        KeyCode::Down | KeyCode::Char('j') => buffer.navigate(LogNavigation::Down, page_size),
+        KeyCode::PageUp => buffer.navigate(LogNavigation::PageUp, page_size),
+        KeyCode::PageDown => buffer.navigate(LogNavigation::PageDown, page_size),
+        KeyCode::Home | KeyCode::Char('g') => buffer.navigate(LogNavigation::Home, page_size),
+        KeyCode::End | KeyCode::Char('G') => buffer.navigate(LogNavigation::End, page_size),
+        KeyCode::Left | KeyCode::Char('h') => buffer.navigate(LogNavigation::Left, page_size),
+        KeyCode::Right | KeyCode::Char('l') => buffer.navigate(LogNavigation::Right, page_size),
+        KeyCode::Char('f') => buffer.toggle_follow(),
+        KeyCode::Char('w') => buffer.toggle_wrap(),
+        KeyCode::Char('c') => buffer.clear(),
+        _ => {}
+    }
+    false
+}
+
+fn render_logs(frame: &mut ratatui::Frame<'_>, view: &LogView) {
+    let footer_lines = log_shortcut_legend(frame.area().width, view.buffer.is_wrapping());
+    let footer_height = u16::try_from(footer_lines.len()).unwrap_or(u16::MAX).max(1);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(footer_height),
+        ])
+        .split(frame.area());
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("● ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                view.service_name.clone(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" logs", Style::default().fg(Color::DarkGray)),
+        ])),
+        chunks[0],
+    );
+    let stream_label = if view.running { "live" } else { "ended" };
+    let stream_color = if view.running {
+        Color::Green
+    } else {
+        Color::Red
+    };
+    let follow_label = if view.buffer.is_following() {
+        "follow"
+    } else {
+        "paused"
+    };
+    let wrap_label = if view.buffer.is_wrapping() {
+        "wrap"
+    } else {
+        "nowrap"
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(stream_label, Style::default().fg(stream_color)),
+            Span::styled(" │ ", Style::default().fg(Color::Rgb(72, 72, 72))),
+            Span::styled(follow_label, Style::default().fg(Color::Gray)),
+            Span::styled(" │ ", Style::default().fg(Color::Rgb(72, 72, 72))),
+            Span::styled(wrap_label, Style::default().fg(Color::Gray)),
+            Span::styled(" │ ", Style::default().fg(Color::Rgb(72, 72, 72))),
+            Span::styled(
+                format!("{} lines", view.buffer.len()),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]))
+        .alignment(Alignment::Right),
+        chunks[0],
+    );
+
+    let body_height = usize::from(chunks[1].height);
+    let visible = view.buffer.visible_lines(body_height);
+    if visible.is_empty() {
+        let message = if view.running {
+            "Waiting for logs…"
+        } else {
+            view.stream.last_error().unwrap_or("Log stream ended")
+        };
+        frame.render_widget(
+            Paragraph::new(message).style(Style::default().fg(Color::DarkGray)),
+            chunks[1],
+        );
+    } else {
+        let mut lines = visible
+            .into_iter()
+            .flat_map(styled_log_lines)
+            .collect::<Vec<_>>();
+        if view.buffer.is_following() && lines.len() > body_height {
+            lines.drain(..lines.len() - body_height);
+        }
+        let body_width = usize::from(chunks[1].width).max(1);
+        let wrapped_height = lines
+            .iter()
+            .map(|line| line.width().max(1).div_ceil(body_width))
+            .sum::<usize>();
+        let mut logs = Paragraph::new(Text::from(lines));
+        if view.buffer.is_wrapping() {
+            logs = logs.wrap(Wrap { trim: false });
+            if view.buffer.is_following() {
+                let scroll = wrapped_height.saturating_sub(body_height);
+                logs = logs.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
+            }
+        } else {
+            logs = logs.scroll((0, view.buffer.horizontal_offset()));
+        }
+        frame.render_widget(logs, chunks[1]);
+    }
+
+    frame.render_widget(
+        Paragraph::new(Text::from(footer_lines)).wrap(Wrap { trim: true }),
+        chunks[2],
+    );
+}
+
+fn styled_log_lines(line: &str) -> Vec<Line<'static>> {
+    let lowercase = line.to_ascii_lowercase();
+    let style = if lowercase.contains("fatal")
+        || lowercase.contains("panic")
+        || lowercase.contains("error")
+        || lowercase.contains("failed")
+    {
+        Style::default().fg(Color::Red)
+    } else if lowercase.contains("warn") {
+        Style::default().fg(Color::Yellow)
+    } else if lowercase.contains("debug") || lowercase.contains("trace") {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let (prefix, message) = line
+        .split_once(" │ ")
+        .map_or((None, line), |(prefix, message)| (Some(prefix), message));
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(message.trim())
+        && (json.is_object() || json.is_array())
+        && let Ok(pretty) = serde_json::to_string_pretty(&json)
+    {
+        return pretty
+            .lines()
+            .enumerate()
+            .map(|(index, json_line)| {
+                let mut spans = Vec::new();
+                if index == 0
+                    && let Some(prefix) = prefix
+                {
+                    spans.push(Span::styled(
+                        prefix.to_owned(),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    spans.push(Span::styled(
+                        " │ ",
+                        Style::default().fg(Color::Rgb(72, 72, 72)),
+                    ));
+                } else if prefix.is_some() {
+                    spans.push(Span::raw("  "));
+                }
+                spans.push(Span::styled(json_line.to_owned(), style));
+                Line::from(spans)
+            })
+            .collect();
+    }
+    if let Some(prefix) = prefix {
+        vec![Line::from(vec![
+            Span::styled(prefix.to_owned(), Style::default().fg(Color::DarkGray)),
+            Span::styled(" │ ", Style::default().fg(Color::Rgb(72, 72, 72))),
+            Span::styled(message.to_owned(), style),
+        ])]
+    } else {
+        vec![Line::from(Span::styled(line.to_owned(), style))]
+    }
+}
+
+fn log_shortcut_legend(width: u16, wrapping: bool) -> Vec<Line<'static>> {
+    let entries = [
+        ("↑/↓/j/k", "scroll", true),
+        ("pg↑/pg↓", "page", true),
+        ("home/end", "jump", true),
+        ("f", "follow", true),
+        ("w", "wrap", true),
+        ("h/l", "horizontal", !wrapping),
+        ("c", "clear", true),
+        ("q/esc", "back", true),
+    ];
+    let separator = Span::styled(" │ ", Style::default().fg(Color::Rgb(72, 72, 72)));
+    let mut lines = Vec::new();
+    let mut spans = Vec::new();
+    let mut line_width = 0;
+    for (key, label, enabled) in entries {
+        let key_color = if enabled {
+            Color::Gray
+        } else {
+            Color::DarkGray
+        };
+        let entry = vec![
+            Span::styled(key, Style::default().fg(key_color)),
+            Span::styled(format!(" {label}"), Style::default().fg(Color::DarkGray)),
+        ];
+        let entry_width = Line::from(entry.clone()).width();
+        let separator_width = if spans.is_empty() {
+            0
+        } else {
+            separator.width()
+        };
+        if !spans.is_empty() && line_width + separator_width + entry_width > usize::from(width) {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            line_width = 0;
+        }
+        if !spans.is_empty() {
+            spans.push(separator.clone());
+            line_width += separator.width();
+        }
+        spans.extend(entry);
+        line_width += entry_width;
+    }
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 fn render(
@@ -743,6 +1024,7 @@ fn shortcut_legend(model: &DashboardModel, width: u16, show_help: bool) -> Vec<L
             ("↵/space", "toggle", navigation_enabled),
             ("t", "trigger", navigation_enabled),
             ("e", "enable/disable", navigation_enabled),
+            ("l", "logs", navigation_enabled),
             ("u", "up", model.can_start()),
             ("d", "down", model.can_stop()),
             ("r", "refresh", true),
@@ -755,6 +1037,7 @@ fn shortcut_legend(model: &DashboardModel, width: u16, show_help: bool) -> Vec<L
             ("↵/space", "toggle", navigation_enabled),
             ("t", "trigger", navigation_enabled),
             ("e", "enable/disable", navigation_enabled),
+            ("l", "logs", navigation_enabled),
             ("u", "up", model.can_start()),
             ("d", "down", model.can_stop()),
             ("r", "refresh", true),
@@ -1051,6 +1334,13 @@ mod tests {
                 .0,
             SelectedServiceAction::ToggleEnabled
         );
+        assert_eq!(
+            list_state
+                .selected_service_action(KeyCode::Char('l'), &groups)
+                .unwrap()
+                .0,
+            SelectedServiceAction::Logs
+        );
         assert!(
             list_state
                 .selected_service_action(KeyCode::Char('x'), &groups)
@@ -1081,6 +1371,7 @@ mod tests {
             "↵/space toggle",
             "t trigger",
             "e enable/disable",
+            "l logs",
             "u up",
             "d down",
             "r refresh",
@@ -1122,6 +1413,7 @@ mod tests {
             "↵/space toggle",
             "t trigger",
             "e enable/disable",
+            "l logs",
             "u up",
             "d down",
             "r refresh",
@@ -1142,6 +1434,62 @@ mod tests {
         assert!(toggle_help_for_key(KeyCode::Char('?'), &mut show_help));
         assert!(!show_help);
         assert!(!toggle_help_for_key(KeyCode::Char('t'), &mut show_help));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_view_replaces_the_dashboard_with_pretty_live_output_and_controls() {
+        let stream = TiltLogStream::spawn("/usr/bin/true", "api", 10350).unwrap();
+        let mut view = LogView {
+            service_name: "api".to_owned(),
+            buffer: LogBuffer::with_limits(20, 1024),
+            stream,
+            running: true,
+        };
+        view.buffer.push("word ".repeat(100));
+        view.buffer
+            .push(r#"api │ {"level":"warn","message":"slow"}"#);
+        view.buffer.push("api │ ERROR request failed");
+        view.buffer.push("api │ TAIL");
+        let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+
+        terminal.draw(|frame| render_logs(frame, &view)).unwrap();
+        let rendered = buffer_text(&terminal);
+        let has_red_error = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "E" && cell.fg == Color::Red);
+
+        assert!(rendered.contains("api logs"));
+        assert!(rendered.contains(r#""level": "warn""#));
+        assert!(rendered.contains("f follow"));
+        assert!(rendered.contains("w wrap"));
+        assert!(rendered.contains("c clear"));
+        assert!(rendered.contains("q/esc back"));
+        assert!(rendered.contains("TAIL"));
+        assert!(has_red_error);
+        assert!(!rendered.contains("Services:"));
+    }
+
+    #[test]
+    fn log_view_keys_control_navigation_display_and_back() {
+        let mut buffer = LogBuffer::with_limits(10, 80);
+        for line in ["one", "two", "three"] {
+            buffer.push(line);
+        }
+
+        assert!(!handle_log_key(&mut buffer, KeyCode::Up, 2));
+        assert!(!buffer.is_following());
+        assert!(!handle_log_key(&mut buffer, KeyCode::Char('f'), 2));
+        assert!(buffer.is_following());
+        assert!(!handle_log_key(&mut buffer, KeyCode::Char('w'), 2));
+        assert!(!buffer.is_wrapping());
+        assert!(!handle_log_key(&mut buffer, KeyCode::Char('c'), 2));
+        assert!(buffer.is_empty());
+        assert!(handle_log_key(&mut buffer, KeyCode::Esc, 2));
+        assert!(handle_log_key(&mut buffer, KeyCode::Char('q'), 2));
     }
 
     #[test]

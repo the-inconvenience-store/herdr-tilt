@@ -60,6 +60,7 @@ opens a right-hand split when no dashboard exists.
 | `Enter` or `Space` | Toggle the selected resource group |
 | `t` | Trigger a rebuild of the selected service |
 | `e` | Enable or disable the selected service |
+| `l` | Open live logs for the selected service |
 | `u` | Start a retained `tilt up` session |
 | `d`, then `y` | Confirm, stop Tilt, and run `tilt down` |
 | `n` | Cancel a pending Down confirmation |
@@ -83,6 +84,29 @@ in every applicable group, and unlabeled services appear under `Ungrouped` at
 the end. Group headers show their aggregate status and service count and remain
 collapsed across dashboard refreshes. The synthetic `(Tiltfile)` resource is
 hidden from the service list, while its errors appear in the warning banner.
+
+## Live logs
+
+Press `l` on a service to replace the dashboard with its live Tilt log stream.
+The viewer removes terminal escape sequences, expands JSON records, highlights
+warnings and errors, and remains anchored to the newest visual line while
+following.
+
+| Key | Action |
+| --- | --- |
+| `↑`/`↓` or `k`/`j` | Scroll one log record |
+| `Page Up`/`Page Down` | Scroll one viewport |
+| `Home`/`g` or `End`/`G` | Jump to the oldest record or resume at the tail |
+| `f` | Toggle follow mode |
+| `w` | Toggle line wrapping |
+| `←`/`→` or `h`/`l` | Scroll horizontally when wrapping is disabled |
+| `c` | Clear the current scrollback |
+| `q` or `Esc` | Return to the dashboard |
+
+For predictable memory use, scrollback is capped at 2,000 records, each record
+is capped at 8 KiB while it is read, and the reader-to-UI channel holds at most
+128 pending records. Closing the viewer terminates and reaps its `tilt logs`
+process while leaving Tilt itself running.
 
 ## Session behavior
 

@@ -1,3 +1,4 @@
+pub mod logs;
 pub mod open;
 pub mod project;
 pub mod session;
