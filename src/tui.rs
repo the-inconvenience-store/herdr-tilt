@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use crate::logs::{LogBuffer, LogNavigation, TiltLogStream};
 use crate::project::Project;
 use crate::project::{InvocationContext, resolve_project};
-use crate::session::{SessionPhase, load_session};
+use crate::session::{SessionPhase, discard_start_request, load_session, prepare_start_request};
 use crate::tilt::{
     CircleStatus, ResourceGroup, Service, ServiceAction, activate_service_action,
     attach_service_actions, open_tilt_web_ui, parse_session_identity, parse_ui_buttons,
@@ -241,6 +241,7 @@ pub enum OverallStatus {
 pub struct DashboardModel {
     pub project: Project,
     pub state_dir: PathBuf,
+    workspace_id: Option<String>,
     pub services: Vec<Service>,
     pub groups: Vec<ResourceGroup>,
     overall_status: OverallStatus,
@@ -249,6 +250,14 @@ pub struct DashboardModel {
 
 impl DashboardModel {
     pub fn new(project: Project, state_dir: PathBuf) -> Self {
+        Self::new_for_workspace(project, state_dir, None)
+    }
+
+    pub fn new_for_workspace(
+        project: Project,
+        state_dir: PathBuf,
+        workspace_id: Option<String>,
+    ) -> Self {
         let (overall_status, warning) = if project.tiltfile.is_some() {
             (OverallStatus::Stopped, None)
         } else {
@@ -260,6 +269,7 @@ impl DashboardModel {
         Self {
             project,
             state_dir,
+            workspace_id,
             services: Vec::new(),
             groups: Vec::new(),
             overall_status,
@@ -416,11 +426,21 @@ impl DashboardModel {
         if !self.can_start() {
             bail!("Tilt cannot be started in the current dashboard state");
         }
+        let request_path =
+            prepare_start_request(&self.project, &self.state_dir, self.workspace_id.as_deref())?;
         let output = Command::new(herdr)
             .args(["plugin", "action", "invoke", "herdr.tilt.run"])
             .output()
-            .context("invoke retained Tilt action")?;
+            .context("invoke retained Tilt action");
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                discard_start_request(request_path.as_deref());
+                return Err(error);
+            }
+        };
         if !output.status.success() {
+            discard_start_request(request_path.as_deref());
             bail!(
                 "Herdr could not start Tilt: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
@@ -551,7 +571,8 @@ pub fn run_from_env() -> Result<()> {
     let tilt = env::var("TILT_BIN_PATH").unwrap_or_else(|_| "tilt".to_owned());
     let herdr = env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_owned());
     let binary = env::current_exe().context("resolve herdr-tilt executable")?;
-    let mut model = DashboardModel::new(project, state_dir);
+    let workspace_id = context.workspace_id.clone();
+    let mut model = DashboardModel::new_for_workspace(project, state_dir, workspace_id);
     let mut terminal = TerminalGuard::enter()?;
     let mut last_refresh = Instant::now() - Duration::from_secs(2);
     let mut confirm_down = false;

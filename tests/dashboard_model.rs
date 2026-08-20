@@ -245,6 +245,64 @@ fn dashboard_start_invokes_the_retained_herdr_action() {
 }
 
 #[test]
+fn dashboard_start_hands_its_project_to_the_retained_action() {
+    let workspace = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let tiltfile = workspace.path().join("Tiltfile");
+    fs::write(&tiltfile, "").unwrap();
+    let project = Project {
+        root: workspace.path().canonicalize().unwrap(),
+        tiltfile: Some(tiltfile.canonicalize().unwrap()),
+    };
+    let capture = workspace.path().join("tilt-args");
+    let fake_tilt = workspace.path().join("tilt");
+    fs::write(
+        &fake_tilt,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\n",
+    )
+    .unwrap();
+    support::publish_executable(&fake_tilt);
+
+    let context = serde_json::json!({
+        "workspace_id": "w1",
+        "workspace_cwd": plugin_root.path(),
+        "focused_pane_cwd": plugin_root.path(),
+    });
+    let fake_herdr = workspace.path().join("herdr");
+    fs::write(
+        &fake_herdr,
+        format!(
+            "#!/bin/sh\nHERDR_PLUGIN_CONTEXT_JSON='{}' HERDR_PLUGIN_STATE_DIR='{}' TILT_BIN_PATH='{}' CAPTURE='{}' '{}' run\n",
+            context,
+            state.path().display(),
+            fake_tilt.display(),
+            capture.display(),
+            assert_cmd::cargo::cargo_bin!("herdr-tilt").display(),
+        ),
+    )
+    .unwrap();
+    support::publish_executable(&fake_herdr);
+
+    let mut model = DashboardModel::new_for_workspace(
+        project.clone(),
+        state.path().to_path_buf(),
+        Some("w1".to_owned()),
+    );
+
+    model.start_with_herdr(&fake_herdr).unwrap();
+
+    let args = fs::read_to_string(capture).unwrap();
+    assert!(args.contains(&project.tiltfile.unwrap().display().to_string()));
+    assert_eq!(
+        fs::read_dir(state.path().join("start-requests"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn dashboard_triggers_a_resource_on_the_active_tilt_port() {
     let workspace = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();

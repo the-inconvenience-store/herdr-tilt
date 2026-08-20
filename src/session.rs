@@ -36,15 +36,55 @@ pub struct SessionRecord {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Deserialize, Serialize)]
+struct StartRequest {
+    project_root: PathBuf,
+    tiltfile: PathBuf,
+}
+
 pub fn run_from_env() -> Result<()> {
     let context_json =
         env::var("HERDR_PLUGIN_CONTEXT_JSON").context("HERDR_PLUGIN_CONTEXT_JSON is not set")?;
     let context = InvocationContext::from_json(&context_json)?;
-    let project = resolve_project(&context)?;
     let state_dir = env::var("HERDR_PLUGIN_STATE_DIR")
         .map(PathBuf::from)
         .context("HERDR_PLUGIN_STATE_DIR is not set")?;
+    let project = match take_start_request(&state_dir, context.workspace_id.as_deref())? {
+        Some(project) => project,
+        None => resolve_project(&context)?,
+    };
     run_project(&project, &state_dir)
+}
+
+pub fn prepare_start_request(
+    project: &Project,
+    state_dir: &Path,
+    workspace_id: Option<&str>,
+) -> Result<Option<PathBuf>> {
+    let Some(workspace_id) = workspace_id else {
+        return Ok(None);
+    };
+    let tiltfile = project
+        .tiltfile
+        .as_ref()
+        .context("No Tiltfile found in this workspace")?;
+    let path = start_request_path(state_dir, workspace_id);
+    let parent = path.parent().context("start request path has no parent")?;
+    fs::create_dir_all(parent).context("create start request directory")?;
+    let request = StartRequest {
+        project_root: project.root.clone(),
+        tiltfile: tiltfile.clone(),
+    };
+    let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    fs::write(&temporary, serde_json::to_vec(&request)?).context("write start request")?;
+    fs::rename(&temporary, &path).context("commit start request")?;
+    Ok(Some(path))
+}
+
+pub fn discard_start_request(path: Option<&Path>) {
+    if let Some(path) = path {
+        let _ = fs::remove_file(path);
+    }
 }
 
 pub fn down_from_env() -> Result<()> {
@@ -129,6 +169,42 @@ fn run_project(project: &Project, state_dir: &Path) -> Result<()> {
     record.exit_code = status.code();
     write_record(&path, &record)?;
     Ok(())
+}
+
+fn take_start_request(state_dir: &Path, workspace_id: Option<&str>) -> Result<Option<Project>> {
+    let Some(workspace_id) = workspace_id else {
+        return Ok(None);
+    };
+    let path = start_request_path(state_dir, workspace_id);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read start request"),
+    };
+    fs::remove_file(&path).context("consume start request")?;
+    let request: StartRequest = serde_json::from_slice(&bytes).context("parse start request")?;
+    let project_root = request
+        .project_root
+        .canonicalize()
+        .context("canonicalize requested project root")?;
+    let tiltfile = request
+        .tiltfile
+        .canonicalize()
+        .context("canonicalize requested Tiltfile")?;
+    if !tiltfile.is_file() || tiltfile.parent() != Some(project_root.as_path()) {
+        bail!("retained Tilt start request does not identify a project Tiltfile");
+    }
+    Ok(Some(Project {
+        root: project_root,
+        tiltfile: Some(tiltfile),
+    }))
+}
+
+fn start_request_path(state_dir: &Path, workspace_id: &str) -> PathBuf {
+    let digest = Sha256::digest(workspace_id.as_bytes());
+    state_dir
+        .join("start-requests")
+        .join(format!("{digest:x}.json"))
 }
 
 fn down_project(project: &Project, state_dir: &Path) -> Result<()> {
