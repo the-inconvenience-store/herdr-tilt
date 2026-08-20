@@ -493,21 +493,22 @@ fn render(
                     } else {
                         "▾ "
                     };
+                    let group_style = Style::default()
+                        .fg(circle_color(group.status))
+                        .add_modifier(Modifier::BOLD);
                     ListItem::new(Line::from(vec![
-                        Span::raw(disclosure),
-                        Span::styled("● ", Style::default().fg(circle_color(group.status))),
+                        Span::styled(disclosure, group_style),
+                        Span::styled("● ", group_style),
+                        Span::styled(group.name.clone(), group_style),
                         Span::styled(
-                            group.name.clone(),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("  {}", group.services.len()),
+                            format!(" ({})", group.services.len()),
                             Style::default().fg(Color::DarkGray),
                         ),
                     ]))
                 }
                 ServiceListRow::Service(service) => ListItem::new(Line::from(vec![
-                    Span::styled("   ● ", Style::default().fg(circle_color(service.status))),
+                    Span::raw("  "),
+                    Span::styled("● ", Style::default().fg(circle_color(service.status))),
                     Span::styled(
                         service.name.clone(),
                         Style::default().add_modifier(Modifier::BOLD),
@@ -518,10 +519,7 @@ fn render(
             .collect()
     };
     frame.render_stateful_widget(
-        List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Services"))
-            .highlight_symbol("› ")
-            .highlight_style(Style::default().bg(SERVICE_SELECTION_BG)),
+        List::new(items).highlight_style(Style::default().bg(SERVICE_SELECTION_BG)),
         chunks[2],
         &mut service_list.inner,
     );
@@ -778,6 +776,36 @@ mod tests {
         assert!(!rendered.contains("frontend"));
         assert!(rendered.contains("infra"));
         assert!(rendered.contains("postgres"));
+    }
+
+    #[test]
+    fn services_render_as_a_borderless_colored_hierarchy() {
+        let project = Project {
+            root: PathBuf::from("/project"),
+            tiltfile: Some(PathBuf::from("/project/Tiltfile")),
+        };
+        let mut model = DashboardModel::new(project, PathBuf::from("/state"));
+        model.overall_status = OverallStatus::Running;
+        model.groups = vec![group("apps", "frontend")];
+        model.services = model.groups[0].services.clone();
+        let mut list_state = ServiceListState::default();
+        list_state.sync(&model.groups);
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &model, false, &mut list_state))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let group_row = (0..100)
+            .map(|x| buffer[(x, 1)].symbol())
+            .collect::<String>();
+        let service_row = (0..100)
+            .map(|x| buffer[(x, 2)].symbol())
+            .collect::<String>();
+
+        assert!(group_row.starts_with("▾ ● apps (1)"));
+        assert_eq!(buffer[(4, 1)].fg, circle_color(CircleStatus::Green));
+        assert!(service_row.starts_with("  ● frontend  healthy"));
     }
 
     #[test]
