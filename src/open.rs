@@ -43,17 +43,23 @@ pub fn open_panel_from_env() -> Result<()> {
         "--direction".to_owned(),
         "right".to_owned(),
     ];
-    if let Some(workspace_id) = context.workspace_id {
+    // Herdr 0.8.0 rejects split requests that specify both a workspace and a
+    // target pane, even though both flags are accepted by the CLI. A qualified
+    // pane ID already identifies its workspace, so only send the workspace as
+    // a fallback when the action context has no pane target.
+    if context.focused_pane_id.is_none()
+        && let Some(workspace_id) = context.workspace_id
+    {
         args.extend(["--workspace".to_owned(), workspace_id]);
     }
     if let Some(pane_id) = context.focused_pane_id {
         args.extend(["--target-pane".to_owned(), pane_id]);
     }
-    args.extend([
-        "--cwd".to_owned(),
-        project.root.display().to_string(),
-        "--focus".to_owned(),
-    ]);
+    // Keep the pane's launch directory at the plugin root so a manifest
+    // command such as `./target/release/herdr-tilt` remains resolvable. The
+    // pane inherits the invocation context, which is the authoritative source
+    // for resolving the Tilt project.
+    args.push("--focus".to_owned());
 
     let output = Command::new(&herdr)
         .args(&args)

@@ -12,17 +12,16 @@ command = ["cargo", "build", "--release", "--locked"]
 id = "open"
 title = "Open Tilt status"
 contexts = ["workspace"]
-command = ["target/release/herdr-tilt", "open"]
+command = ["./target/release/herdr-tilt", "open"]
 
 [[actions]]
 id = "run"
 title = "Start retained Tilt session"
 contexts = ["workspace"]
-command = ["target/release/herdr-tilt", "run"]
+command = ["./target/release/herdr-tilt", "run"]
 
 [[panes]]
 id = "status"
 title = "Tilt"
 placement = "split"
-command = ["target/release/herdr-tilt", "tui"]
-
+command = ["./target/release/herdr-tilt", "tui"]

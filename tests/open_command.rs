@@ -55,15 +55,24 @@ fn open_command_opens_status_split_for_workspace() {
             "split",
             "--direction",
             "right",
-            "--workspace",
-            "w1",
             "--target-pane",
             "w1:p1",
-            "--cwd",
-            project.canonicalize().unwrap().to_str().unwrap(),
             "--focus",
         ]
     );
+}
+
+#[test]
+fn manifest_commands_are_resolvable_from_the_plugin_root() {
+    let manifest = fs::read_to_string("herdr-plugin.toml").unwrap();
+
+    for command in ["open", "run", "tui"] {
+        let expected = format!("command = [\"./target/release/herdr-tilt\", \"{command}\"]");
+        assert!(
+            manifest.contains(&expected),
+            "manifest must declare plugin-root-relative command: {expected}"
+        );
+    }
 }
 
 #[test]
