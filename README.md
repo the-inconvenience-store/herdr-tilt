@@ -88,6 +88,8 @@ hidden from the service list, while its errors appear in the warning banner.
 
 Services with Tilt endpoint links or custom resource-scoped UI buttons show a
 right-aligned `↗` marker (and an action count when there is more than one).
+Selecting the service expands that marker into an inline preview of its action
+titles.
 Press `a` to run the only action immediately or open a picker when multiple
 actions are available. Use `↑`/`↓` or `j`/`k` in the picker, `Enter` or `Space`
 to activate, and `q` or `Esc` to return. URL actions open in the system browser.

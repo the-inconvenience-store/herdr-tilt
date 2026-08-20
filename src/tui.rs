@@ -1176,7 +1176,8 @@ fn render(
     } else {
         visible_rows
             .iter()
-            .map(|row| match row {
+            .enumerate()
+            .map(|(index, row)| match row {
                 ServiceListRow::Group(group) => {
                     let disclosure = if service_list.collapsed.contains(&group.name) {
                         "▸ "
@@ -1196,9 +1197,11 @@ fn render(
                         ),
                     ]))
                 }
-                ServiceListRow::Service(service) => {
-                    ListItem::new(service_line(service, chunks[2].width))
-                }
+                ServiceListRow::Service(service) => ListItem::new(service_line(
+                    service,
+                    chunks[2].width,
+                    service_list.inner.selected() == Some(index),
+                )),
             })
             .collect()
     };
@@ -1214,9 +1217,18 @@ fn render(
     );
 }
 
-fn service_line(service: &Service, width: u16) -> Line<'static> {
+fn service_line(service: &Service, width: u16, selected: bool) -> Line<'static> {
     let badge = (!service.actions.is_empty()).then(|| {
-        if service.actions.len() == 1 {
+        let badge_limit = usize::from(width).saturating_sub(10).max(1);
+        if selected && badge_limit > 2 {
+            let titles = service
+                .actions
+                .iter()
+                .map(ServiceAction::label)
+                .collect::<Vec<_>>()
+                .join(" · ");
+            format!("↗ {}", clip_with_ellipsis(&titles, badge_limit - 2))
+        } else if selected || service.actions.len() == 1 {
             "↗".to_owned()
         } else {
             format!("↗ {}", service.actions.len())
@@ -1242,7 +1254,15 @@ fn service_line(service: &Service, width: u16) -> Line<'static> {
         let content_width = Line::from(spans.clone()).width();
         let padding = usize::from(width).saturating_sub(content_width + badge.chars().count());
         spans.push(Span::raw(" ".repeat(padding)));
-        spans.push(Span::styled(badge, Style::default().fg(Color::Cyan)));
+        if selected && badge.starts_with("↗ ") {
+            spans.push(Span::styled("↗", Style::default().fg(Color::Cyan)));
+            spans.push(Span::styled(
+                badge.trim_start_matches('↗').to_owned(),
+                Style::default().fg(Color::DarkGray),
+            ));
+        } else {
+            spans.push(Span::styled(badge, Style::default().fg(Color::Cyan)));
+        }
     }
     Line::from(spans)
 }
@@ -1686,7 +1706,7 @@ mod tests {
             },
         ];
 
-        let line = service_line(&service, 40);
+        let line = service_line(&service, 40, false);
         let rendered = line
             .spans
             .iter()
@@ -1707,7 +1727,7 @@ mod tests {
             url: "https://app.test".to_owned(),
         }];
 
-        let line = service_line(&service, 24);
+        let line = service_line(&service, 24, false);
         let rendered = line
             .spans
             .iter()
@@ -1716,6 +1736,54 @@ mod tests {
 
         assert_eq!(line.width(), 24);
         assert!(rendered.ends_with('↗'));
+    }
+
+    #[test]
+    fn selected_service_row_previews_action_titles_next_to_the_icon() {
+        let mut service = group("apps", "frontend").services.remove(0);
+        service.actions = vec![
+            ServiceAction::Link {
+                label: "Open app".to_owned(),
+                url: "https://app.test".to_owned(),
+            },
+            ServiceAction::Button {
+                name: "seed".to_owned(),
+                label: "Seed data".to_owned(),
+                requires_confirmation: false,
+                inputs: vec![],
+            },
+        ];
+
+        let line = service_line(&service, 60, true);
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(line.width(), 60);
+        assert!(rendered.ends_with("↗ Open app · Seed data"));
+    }
+
+    #[test]
+    fn selected_action_preview_truncates_without_losing_the_icon() {
+        let mut service = group("apps", "frontend").services.remove(0);
+        service.detail = "healthy but with a long explanation".to_owned();
+        service.actions = vec![ServiceAction::Link {
+            label: "An extremely long action title".to_owned(),
+            url: "https://app.test".to_owned(),
+        }];
+
+        let line = service_line(&service, 28, true);
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(line.width(), 28);
+        assert!(rendered.contains("↗ "));
+        assert!(rendered.ends_with('…'));
     }
 
     #[test]
