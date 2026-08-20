@@ -21,7 +21,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 const DEFAULT_TILT_PORT: u16 = 10350;
@@ -444,6 +444,10 @@ fn render(
     service_list: &mut ServiceListState,
 ) {
     let has_banner = model.warning().is_some() || confirm_down;
+    let shortcut_lines = shortcut_legend(model, frame.area().width);
+    let shortcut_height = u16::try_from(shortcut_lines.len())
+        .unwrap_or(u16::MAX)
+        .max(1);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if has_banner {
@@ -451,14 +455,14 @@ fn render(
                 Constraint::Length(3),
                 Constraint::Length(3),
                 Constraint::Min(2),
-                Constraint::Length(2),
+                Constraint::Length(shortcut_height),
             ]
         } else {
             vec![
                 Constraint::Length(3),
                 Constraint::Length(0),
                 Constraint::Min(2),
-                Constraint::Length(2),
+                Constraint::Length(shortcut_height),
             ]
         })
         .split(frame.area());
@@ -537,23 +541,63 @@ fn render(
         &mut service_list.inner,
     );
 
-    let up = if model.can_start() {
-        "u Up"
-    } else {
-        "u Up (disabled)"
-    };
-    let down = if model.can_stop() {
-        "d Down"
-    } else {
-        "d Down (disabled)"
-    };
     frame.render_widget(
-        Paragraph::new(format!(
-            " ↑/↓ j/k Move   ↵/Space Toggle   {up}   {down}   r Refresh   q Close"
-        ))
-        .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(Text::from(shortcut_lines)).wrap(Wrap { trim: true }),
         chunks[3],
     );
+}
+
+fn shortcut_legend(model: &DashboardModel, width: u16) -> Vec<Line<'static>> {
+    let navigation_enabled = !model.groups.is_empty();
+    let entries = [
+        ("↑/↓", "nav", navigation_enabled),
+        ("pg↑/pg↓", "page", navigation_enabled),
+        ("home/end", "jump", navigation_enabled),
+        ("↵/space", "toggle", navigation_enabled),
+        ("←", "collapse", navigation_enabled),
+        ("→", "expand", navigation_enabled),
+        ("u", "up", model.can_start()),
+        ("d", "down", model.can_stop()),
+        ("r", "refresh", true),
+        ("q", "close", true),
+    ];
+    let separator = Span::styled(" │ ", Style::default().fg(Color::Rgb(72, 72, 72)));
+    let mut lines = Vec::new();
+    let mut spans = Vec::new();
+    let mut line_width = 0;
+
+    for (key, label, enabled) in entries {
+        let key_color = if enabled {
+            Color::Gray
+        } else {
+            Color::DarkGray
+        };
+        let entry = vec![
+            Span::styled(key, Style::default().fg(key_color)),
+            Span::styled(format!(" {label}"), Style::default().fg(Color::DarkGray)),
+        ];
+        let entry_width = Line::from(entry.clone()).width();
+        let separator_width = if spans.is_empty() {
+            0
+        } else {
+            separator.width()
+        };
+
+        if !spans.is_empty() && line_width + separator_width + entry_width > usize::from(width) {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            line_width = 0;
+        }
+        if !spans.is_empty() {
+            spans.push(separator.clone());
+            line_width += separator.width();
+        }
+        spans.extend(entry);
+        line_width += entry_width;
+    }
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 fn overall_label(status: OverallStatus) -> &'static str {
@@ -703,5 +747,38 @@ mod tests {
         assert!(list_state.handle_key(KeyCode::Char(' '), &groups));
         assert_eq!(list_state.visible_rows(&groups).len(), 1);
         assert!(!list_state.handle_key(KeyCode::Char('u'), &groups));
+    }
+
+    #[test]
+    fn shortcut_legend_wraps_without_clipping_in_a_narrow_panel() {
+        let project = Project {
+            root: PathBuf::from("/project"),
+            tiltfile: Some(PathBuf::from("/project/Tiltfile")),
+        };
+        let mut model = DashboardModel::new(project, PathBuf::from("/state"));
+        model.overall_status = OverallStatus::Running;
+        model.groups = vec![group("apps", "frontend")];
+        let mut list_state = ServiceListState::default();
+        list_state.sync(&model.groups);
+        let mut terminal = Terminal::new(TestBackend::new(38, 18)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &model, false, &mut list_state))
+            .unwrap();
+        let rendered = buffer_text(&terminal);
+
+        for shortcut in [
+            "↑/↓ nav",
+            "↵/space toggle",
+            "← collapse",
+            "→ expand",
+            "u up",
+            "d down",
+            "r refresh",
+            "q close",
+        ] {
+            assert!(rendered.contains(shortcut), "missing shortcut: {shortcut}");
+        }
+        assert!(rendered.contains("frontend"));
     }
 }
