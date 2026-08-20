@@ -1,0 +1,28 @@
+id = "herdr.tilt"
+name = "Tilt"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Control and monitor Tilt services from a Herdr split pane."
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
+
+[[actions]]
+id = "open"
+title = "Open Tilt status"
+contexts = ["workspace"]
+command = ["target/release/herdr-tilt", "open"]
+
+[[actions]]
+id = "run"
+title = "Start retained Tilt session"
+contexts = ["workspace"]
+command = ["target/release/herdr-tilt", "run"]
+
+[[panes]]
+id = "status"
+title = "Tilt"
+placement = "split"
+command = ["target/release/herdr-tilt", "tui"]
+
