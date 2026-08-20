@@ -19,7 +19,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
@@ -456,6 +456,14 @@ fn render(
         .split(frame.area());
 
     frame.render_widget(metrics, chunks[0]);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            overall_label(model.overall_status()),
+            Style::default().fg(overall_color(model.overall_status())),
+        ))
+        .alignment(Alignment::Right),
+        Rect::new(chunks[0].x, chunks[0].y, chunks[0].width, 1),
+    );
 
     if has_banner {
         let message = if confirm_down {
@@ -544,31 +552,35 @@ fn service_metric_lines(model: &DashboardModel, width: u16) -> Vec<Line<'static>
         ("Failed", failed),
         ("Inactive", inactive),
     ];
-    let mut entries = vec![vec![Span::styled(
-        overall_label(model.overall_status()),
-        Style::default().fg(overall_color(model.overall_status())),
-    )]];
-    entries.extend(values.into_iter().map(|(label, value)| {
+    let entries = values.into_iter().map(|(label, value)| {
         vec![
             Span::styled(format!("{label}: "), Style::default().fg(Color::DarkGray)),
             Span::styled(value.to_string(), Style::default().fg(Color::Gray)),
         ]
-    }));
+    });
 
     let separator = Span::styled(" │ ", Style::default().fg(Color::Rgb(72, 72, 72)));
+    let full_width = usize::from(width);
+    let status_width = overall_label(model.overall_status()).len();
+    let mut line_capacity = full_width.saturating_sub(status_width + 1);
     let mut lines = Vec::new();
     let mut spans = Vec::new();
     let mut line_width = 0;
     for entry in entries {
         let entry_width = Line::from(entry.clone()).width();
+        if spans.is_empty() && lines.is_empty() && entry_width > line_capacity {
+            lines.push(Line::default());
+            line_capacity = full_width;
+        }
         let separator_width = if spans.is_empty() {
             0
         } else {
             separator.width()
         };
-        if !spans.is_empty() && line_width + separator_width + entry_width > usize::from(width) {
+        if !spans.is_empty() && line_width + separator_width + entry_width > line_capacity {
             lines.push(Line::from(std::mem::take(&mut spans)));
             line_width = 0;
+            line_capacity = full_width;
         }
         if !spans.is_empty() {
             spans.push(separator.clone());
@@ -853,7 +865,11 @@ mod tests {
         let rendered = buffer_text(&terminal);
 
         let first_row = (0..80).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
-        assert_eq!(buffer[(0, 0)].symbol(), "r");
+        let status = (73..80)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect::<String>();
+        assert_eq!(buffer[(0, 0)].symbol(), "S");
+        assert_eq!(status, "running");
         assert!(!rendered.contains("Tilt"));
         assert!(first_row.contains("Services: 4"));
         assert!(first_row.contains("running"));
@@ -900,8 +916,13 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
         let first_row = (0..38).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+        let status = (31..38)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect::<String>();
         let rendered = buffer_text(&terminal);
 
+        assert_eq!(buffer[(0, 0)].symbol(), "S");
+        assert_eq!(status, "running");
         assert!(first_row.contains("running"));
         assert!(first_row.contains("Services: 4"));
         for metric in [
