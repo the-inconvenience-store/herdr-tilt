@@ -19,9 +19,61 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 const DEFAULT_TILT_PORT: u16 = 10350;
+const SERVICE_PAGE_SIZE: usize = 10;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServiceNavigation {
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+}
+
+#[derive(Debug, Default)]
+struct ServiceListState {
+    inner: ListState,
+}
+
+impl ServiceListState {
+    fn sync(&mut self, service_count: usize) {
+        if service_count == 0 {
+            self.inner.select(None);
+        } else {
+            let selected = self
+                .inner
+                .selected()
+                .unwrap_or_default()
+                .min(service_count - 1);
+            self.inner.select(Some(selected));
+        }
+    }
+
+    fn navigate(&mut self, navigation: ServiceNavigation, service_count: usize) {
+        if service_count == 0 {
+            self.inner.select(None);
+            return;
+        }
+        let selected = self
+            .inner
+            .selected()
+            .unwrap_or_default()
+            .min(service_count - 1);
+        let selected = match navigation {
+            ServiceNavigation::Up => selected.saturating_sub(1),
+            ServiceNavigation::Down => (selected + 1).min(service_count - 1),
+            ServiceNavigation::PageUp => selected.saturating_sub(SERVICE_PAGE_SIZE),
+            ServiceNavigation::PageDown => (selected + SERVICE_PAGE_SIZE).min(service_count - 1),
+            ServiceNavigation::Home => 0,
+            ServiceNavigation::End => service_count - 1,
+        };
+        self.inner.select(Some(selected));
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverallStatus {
@@ -235,6 +287,7 @@ pub fn run_from_env() -> Result<()> {
     let mut terminal = TerminalGuard::enter()?;
     let mut last_refresh = Instant::now() - Duration::from_secs(2);
     let mut confirm_down = false;
+    let mut service_list = ServiceListState::default();
 
     loop {
         if last_refresh.elapsed() >= Duration::from_secs(1) {
@@ -245,9 +298,10 @@ pub fn run_from_env() -> Result<()> {
             }
             last_refresh = Instant::now();
         }
+        service_list.sync(model.services.len());
         terminal
             .terminal
-            .draw(|frame| render(frame, &model, confirm_down))?;
+            .draw(|frame| render(frame, &model, confirm_down, &mut service_list))?;
 
         if !event::poll(Duration::from_millis(100))? {
             continue;
@@ -260,6 +314,30 @@ pub fn run_from_env() -> Result<()> {
         }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => break,
+            KeyCode::Up | KeyCode::Char('k') => {
+                confirm_down = false;
+                service_list.navigate(ServiceNavigation::Up, model.services.len());
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                confirm_down = false;
+                service_list.navigate(ServiceNavigation::Down, model.services.len());
+            }
+            KeyCode::PageUp => {
+                confirm_down = false;
+                service_list.navigate(ServiceNavigation::PageUp, model.services.len());
+            }
+            KeyCode::PageDown => {
+                confirm_down = false;
+                service_list.navigate(ServiceNavigation::PageDown, model.services.len());
+            }
+            KeyCode::Home => {
+                confirm_down = false;
+                service_list.navigate(ServiceNavigation::Home, model.services.len());
+            }
+            KeyCode::End => {
+                confirm_down = false;
+                service_list.navigate(ServiceNavigation::End, model.services.len());
+            }
             KeyCode::Char('u') if model.can_start() => {
                 confirm_down = false;
                 if let Err(error) = model.start_with_herdr(&herdr) {
@@ -309,7 +387,12 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn render(frame: &mut ratatui::Frame<'_>, model: &DashboardModel, confirm_down: bool) {
+fn render(
+    frame: &mut ratatui::Frame<'_>,
+    model: &DashboardModel,
+    confirm_down: bool,
+    service_list: &mut ServiceListState,
+) {
     let has_banner = model.warning().is_some() || confirm_down;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -376,9 +459,13 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &DashboardModel, confirm_down: 
             })
             .collect()
     };
-    frame.render_widget(
-        List::new(items).block(Block::default().borders(Borders::ALL).title("Services")),
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(Block::default().borders(Borders::ALL).title("Services"))
+            .highlight_symbol("› ")
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
         chunks[2],
+        &mut service_list.inner,
     );
 
     let up = if model.can_start() {
@@ -392,8 +479,10 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &DashboardModel, confirm_down: 
         "d Down (disabled)"
     };
     frame.render_widget(
-        Paragraph::new(format!(" {up}   {down}   r Refresh   q Close"))
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(format!(
+            " ↑/↓ j/k Scroll   {up}   {down}   r Refresh   q Close"
+        ))
+        .style(Style::default().fg(Color::DarkGray)),
         chunks[3],
     );
 }
@@ -433,5 +522,43 @@ fn empty_message(status: OverallStatus) -> &'static str {
         OverallStatus::Starting => "Waiting for the Tilt API…",
         OverallStatus::Running => "Tilt is running but has no visible services.",
         OverallStatus::Failed => "Tilt exited. Check the warning and plugin logs.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn service_list_can_scroll_to_the_last_item_in_a_small_panel() {
+        let project = Project {
+            root: PathBuf::from("/project"),
+            tiltfile: Some(PathBuf::from("/project/Tiltfile")),
+        };
+        let mut model = DashboardModel::new(project, PathBuf::from("/state"));
+        model.overall_status = OverallStatus::Running;
+        model.services = (0..20)
+            .map(|index| Service {
+                name: format!("service-{index}"),
+                status: CircleStatus::Green,
+                detail: "healthy".to_owned(),
+            })
+            .collect();
+        let mut list_state = ServiceListState::default();
+        list_state.navigate(ServiceNavigation::End, model.services.len());
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &model, false, &mut list_state))
+            .unwrap();
+
+        let rendered = terminal.backend().buffer().content().to_vec();
+        let rendered = rendered
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("service-19"));
+        assert!(!rendered.contains("service-0 "));
     }
 }

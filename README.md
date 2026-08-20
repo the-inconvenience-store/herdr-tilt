@@ -54,6 +54,9 @@ opens a right-hand split when no dashboard exists.
 
 | Key | Action |
 | --- | --- |
+| `↑`/`↓` or `k`/`j` | Move through services |
+| `Page Up`/`Page Down` | Move ten services at a time |
+| `Home`/`End` | Jump to the first or last service |
 | `u` | Start a retained `tilt up` session |
 | `d`, `d` | Confirm, stop Tilt, and run `tilt down` |
 | `r` | Refresh immediately |
