@@ -60,7 +60,13 @@ pub fn down_from_env() -> Result<()> {
 
 pub fn load_session(project: &Project, state_dir: &Path) -> Option<SessionRecord> {
     let tiltfile = project.tiltfile.as_ref()?;
-    serde_json::from_slice(&fs::read(session_path(state_dir, tiltfile)).ok()?).ok()
+    serde_json::from_slice(&fs::read(record_path(state_dir, tiltfile)).ok()?).ok()
+}
+
+pub fn record_path(state_dir: &Path, tiltfile: &Path) -> PathBuf {
+    state_dir
+        .join("sessions")
+        .join(format!("{}.json", project_key(tiltfile)))
 }
 
 fn run_project(project: &Project, state_dir: &Path) -> Result<()> {
@@ -115,7 +121,7 @@ fn run_project(project: &Project, state_dir: &Path) -> Result<()> {
         phase: SessionPhase::Running,
         exit_code: None,
     };
-    let path = session_path(state_dir, tiltfile);
+    let path = record_path(state_dir, tiltfile);
     write_record(&path, &record)?;
 
     let status = child.wait().context("wait for Tilt")?;
@@ -132,7 +138,7 @@ fn down_project(project: &Project, state_dir: &Path) -> Result<()> {
         .context("No Tiltfile found in this workspace")?;
     let key = project_key(tiltfile);
     let lock_path = state_dir.join("sessions").join(format!("{key}.lock"));
-    let record_path = session_path(state_dir, tiltfile);
+    let record_path = record_path(state_dir, tiltfile);
 
     if project_lock_is_held(&lock_path)?
         && let Some(record) = load_session(project, state_dir)
@@ -206,12 +212,6 @@ fn open_log(path: &Path) -> Result<File> {
         .append(true)
         .open(path)
         .with_context(|| format!("open Tilt log at {}", path.display()))
-}
-
-fn session_path(state_dir: &Path, tiltfile: &Path) -> PathBuf {
-    state_dir
-        .join("sessions")
-        .join(format!("{}.json", project_key(tiltfile)))
 }
 
 fn project_key(tiltfile: &Path) -> String {

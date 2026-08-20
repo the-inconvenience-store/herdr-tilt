@@ -25,6 +25,6 @@ fn main() -> Result<()> {
         Commands::Open => herdr_tilt::open::open_panel_from_env(),
         Commands::Run => herdr_tilt::session::run_from_env(),
         Commands::Down => herdr_tilt::session::down_from_env(),
-        Commands::Tui => Ok(()),
+        Commands::Tui => herdr_tilt::tui::run_from_env(),
     }
 }
