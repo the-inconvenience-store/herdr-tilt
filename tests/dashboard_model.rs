@@ -198,8 +198,12 @@ fi
 
     let mut model = DashboardModel::new(project, state.path().to_path_buf());
     let error = model.refresh_with_tilt(&fake_tilt).unwrap_err();
+    let error = format!("{error:#}");
 
-    assert!(error.to_string().contains("another Tiltfile"));
+    assert!(
+        error.contains("another Tiltfile"),
+        "unexpected refresh failure: {error}"
+    );
     assert!(model.services.is_empty());
     assert_eq!(model.overall_status(), OverallStatus::Failed);
 }
