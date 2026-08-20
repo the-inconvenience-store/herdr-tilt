@@ -66,6 +66,11 @@ fn open_command_opens_status_split_for_workspace() {
 fn manifest_commands_are_resolvable_from_the_plugin_root() {
     let manifest = fs::read_to_string("herdr-plugin.toml").unwrap();
 
+    assert!(
+        manifest.contains("command = [\"/bin/sh\", \"scripts/install.sh\"]"),
+        "installation must use the prebuilt binary downloader"
+    );
+
     for command in ["open", "run", "tui"] {
         let expected = format!("command = [\"./target/release/herdr-tilt\", \"{command}\"]");
         assert!(

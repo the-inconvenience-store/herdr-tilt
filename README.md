@@ -10,11 +10,31 @@ Tilt without tying the Tilt process to the dashboard pane.
 - Tilt on `PATH`
 - macOS or Linux
 
-Installing from source also requires a current stable Rust toolchain.
+No Rust toolchain is needed for a normal installation. The installer downloads
+and verifies a prebuilt binary for Apple Silicon macOS, Intel macOS, ARM64
+Linux, or x86-64 Linux.
+
+## Install
+
+Install a tagged release directly from GitHub:
+
+```sh
+herdr plugin install the-inconvenience-store/herdr-tilt --ref v0.1.0
+```
+
+Herdr clones the tagged source, then the plugin installer downloads the
+matching release binary and verifies its SHA-256 checksum. To upgrade, run the
+same command with the newer release tag. If this checkout is currently linked
+for development, unlink it before installing the managed copy:
+
+```sh
+herdr plugin unlink herdr.tilt
+```
 
 ## Install for development
 
-Build the binary and link this checkout:
+Development requires a current stable Rust toolchain. Build the binary before
+linking because `plugin link` intentionally does not run manifest build steps:
 
 ```sh
 cargo build --release --locked
@@ -167,6 +187,10 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release --locked
 ```
+
+Release maintainers should follow [the release guide](docs/releasing.md). A
+tagged release builds and publishes all four supported binaries and their
+checksums; do not upload release assets by hand.
 
 See [the research note](docs/research/herdr-tilt-plugin.md) for the architecture
 and primary-source references behind the implementation.
