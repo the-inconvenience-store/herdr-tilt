@@ -125,6 +125,18 @@ fn toggle_help_for_key(key: KeyCode, show_help: &mut bool) -> bool {
     true
 }
 
+fn is_refresh_key(key: KeyCode) -> bool {
+    matches!(key, KeyCode::Char('r' | 'R'))
+}
+
+fn refresh_dashboard(model: &mut DashboardModel, tilt: impl AsRef<std::ffi::OsStr>) {
+    if let Err(error) = model.refresh_with_tilt(tilt)
+        && model.overall_status() != OverallStatus::Starting
+    {
+        model.set_warning(error.to_string());
+    }
+}
+
 #[derive(Debug, Default)]
 struct ServiceListState {
     inner: ListState,
@@ -645,11 +657,7 @@ pub fn run_from_env() -> Result<()> {
             continue;
         }
         if last_refresh.elapsed() >= Duration::from_secs(1) {
-            if let Err(error) = model.refresh_with_tilt(&tilt)
-                && model.overall_status() != OverallStatus::Starting
-            {
-                model.set_warning(error.to_string());
-            }
+            refresh_dashboard(&mut model, &tilt);
             last_refresh = Instant::now();
         }
         service_list.sync(&model.groups);
@@ -743,9 +751,10 @@ pub fn run_from_env() -> Result<()> {
                     model.set_warning(error.to_string());
                 }
             }
-            KeyCode::Char('r') => {
+            key if is_refresh_key(key) => {
                 confirm_down = false;
-                last_refresh = Instant::now() - Duration::from_secs(2);
+                refresh_dashboard(&mut model, &tilt);
+                last_refresh = Instant::now();
             }
             _ => confirm_down = false,
         }
@@ -1629,6 +1638,12 @@ mod tests {
         assert!(!rendered.contains("frontend"));
         assert!(rendered.contains("infra"));
         assert!(rendered.contains("postgres"));
+    }
+
+    #[test]
+    fn refresh_key_accepts_lowercase_and_uppercase_r() {
+        assert!(is_refresh_key(KeyCode::Char('r')));
+        assert!(is_refresh_key(KeyCode::Char('R')));
     }
 
     #[test]
