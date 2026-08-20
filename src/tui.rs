@@ -23,6 +23,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 
 const DEFAULT_TILT_PORT: u16 = 10350;
 const SERVICE_PAGE_SIZE: usize = 10;
+const SERVICE_SELECTION_BG: Color = Color::Rgb(58, 58, 58);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ServiceNavigation {
@@ -463,7 +464,7 @@ fn render(
         List::new(items)
             .block(Block::default().borders(Borders::ALL).title("Services"))
             .highlight_symbol("› ")
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+            .highlight_style(Style::default().bg(SERVICE_SELECTION_BG)),
         chunks[2],
         &mut service_list.inner,
     );
@@ -554,6 +555,12 @@ mod tests {
             .unwrap();
 
         let rendered = terminal.backend().buffer().content().to_vec();
+        let selected_cell = rendered
+            .iter()
+            .find(|cell| cell.symbol() == "9")
+            .expect("selected service is rendered");
+        assert_eq!(selected_cell.bg, SERVICE_SELECTION_BG);
+        assert!(!selected_cell.modifier.contains(Modifier::REVERSED));
         let rendered = rendered
             .iter()
             .map(|cell| cell.symbol())
