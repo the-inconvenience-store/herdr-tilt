@@ -778,9 +778,9 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut bytes = vec![0; 8192];
-            let size = stream.read(&mut bytes).unwrap();
-            let request = String::from_utf8_lossy(&bytes[..size]).to_string();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).unwrap();
+            let request = String::from_utf8_lossy(&bytes).to_string();
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
                 .unwrap();
