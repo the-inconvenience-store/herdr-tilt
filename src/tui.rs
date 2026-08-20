@@ -11,7 +11,8 @@ use crate::project::{InvocationContext, resolve_project};
 use crate::session::{SessionPhase, load_session};
 use crate::tilt::{
     CircleStatus, ResourceGroup, Service, ServiceAction, activate_service_action,
-    attach_service_actions, parse_session_identity, parse_ui_buttons, parse_ui_resources,
+    attach_service_actions, open_tilt_web_ui, parse_session_identity, parse_ui_buttons,
+    parse_ui_resources,
 };
 use anyhow::{Context, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -716,6 +717,11 @@ pub fn run_from_env() -> Result<()> {
                 }
             }
             KeyCode::Char('d') if model.can_stop() => confirm_down = true,
+            KeyCode::Char('w') if model.can_stop() => {
+                if let Err(error) = open_tilt_web_ui(model.active_port()) {
+                    model.set_warning(error.to_string());
+                }
+            }
             KeyCode::Char('r') => {
                 confirm_down = false;
                 last_refresh = Instant::now() - Duration::from_secs(2);
@@ -1362,6 +1368,7 @@ fn shortcut_legend(model: &DashboardModel, width: u16, show_help: bool) -> Vec<L
             ("a", "actions", navigation_enabled),
             ("u", "up", model.can_start()),
             ("d", "down", model.can_stop()),
+            ("w", "web UI", model.can_stop()),
             ("r", "refresh", true),
             ("?", "help", true),
             ("q/esc", "close", true),
@@ -1376,6 +1383,7 @@ fn shortcut_legend(model: &DashboardModel, width: u16, show_help: bool) -> Vec<L
             ("a", "actions", navigation_enabled),
             ("u", "up", model.can_start()),
             ("d", "down", model.can_stop()),
+            ("w", "web UI", model.can_stop()),
             ("r", "refresh", true),
             ("?", "help", true),
             ("q", "close", true),
@@ -1896,6 +1904,7 @@ mod tests {
             "a actions",
             "u up",
             "d down",
+            "w web UI",
             "r refresh",
             "? help",
             "q close",
@@ -1939,6 +1948,7 @@ mod tests {
             "a actions",
             "u up",
             "d down",
+            "w web UI",
             "r refresh",
             "? help",
             "q/esc close",

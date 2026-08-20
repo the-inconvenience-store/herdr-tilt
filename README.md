@@ -62,6 +62,7 @@ opens a right-hand split when no dashboard exists.
 | `e` | Enable or disable the selected service |
 | `l` | Open live logs for the selected service |
 | `a` | Open or run actions for the selected service |
+| `w` | Open the active Tilt Web UI in the system browser |
 | `u` | Start a retained `tilt up` session |
 | `d`, then `y` | Confirm, stop Tilt, and run `tilt down` |
 | `n` | Cancel a pending Down confirmation |

@@ -454,6 +454,14 @@ pub fn activate_service_action(action: &ServiceAction, port: u16) -> Result<()> 
     }
 }
 
+pub fn tilt_web_url(port: u16) -> String {
+    format!("http://localhost:{port}/")
+}
+
+pub fn open_tilt_web_ui(port: u16) -> Result<()> {
+    open_url(&tilt_web_url(port))
+}
+
 fn button_status_body(action: &ServiceAction, timestamp: &str) -> Result<Value> {
     let ServiceAction::Button { name, inputs, .. } = action else {
         bail!("only Tilt UI buttons have a status payload");
@@ -793,5 +801,11 @@ mod tests {
         ));
         assert!(request.contains("Content-Type: application/json\r\n"));
         assert!(request.contains(r#""lastClickedAt":"2026-08-20T02:30:00.000000Z""#));
+    }
+
+    #[test]
+    fn tilt_web_url_uses_the_active_api_port() {
+        assert_eq!(tilt_web_url(10350), "http://localhost:10350/");
+        assert_eq!(tilt_web_url(41234), "http://localhost:41234/");
     }
 }
