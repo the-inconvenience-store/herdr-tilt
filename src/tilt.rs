@@ -251,8 +251,8 @@ fn circle_status(status: &ResourceStatus) -> CircleStatus {
         || status.queued
         || status
             .build_history
-            .iter()
-            .any(|build| !build.warnings.is_empty())
+            .first()
+            .is_some_and(|build| !build.warnings.is_empty())
     {
         return CircleStatus::Orange;
     }
@@ -265,10 +265,17 @@ fn circle_status(status: &ResourceStatus) -> CircleStatus {
 }
 
 fn latest_error(status: &ResourceStatus) -> Option<&str> {
+    if status.current_build.is_some()
+        || status.update_status == "in_progress"
+        || status.update_status == "pending"
+        || status.queued
+    {
+        return None;
+    }
     status
         .build_history
-        .iter()
-        .find_map(|build| (!build.error.is_empty()).then_some(build.error.as_str()))
+        .first()
+        .and_then(|build| (!build.error.is_empty()).then_some(build.error.as_str()))
 }
 
 fn status_detail(status: &ResourceStatus) -> &str {

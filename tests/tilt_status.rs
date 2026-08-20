@@ -117,6 +117,54 @@ fn ui_resources_are_grouped_by_labels_with_ungrouped_last() {
 }
 
 #[test]
+fn a_retry_and_success_override_an_older_build_failure() {
+    let retrying = r#"
+    {
+      "items": [{
+        "metadata": {"name": "signoz-platform"},
+        "status": {
+          "order": 1,
+          "updateStatus": "in_progress",
+          "runtimeStatus": "ok",
+          "currentBuild": {"startTime": "2026-08-20T01:59:26Z"},
+          "buildHistory": [{
+            "error": "apply command timed out after 10m0s",
+            "finishTime": "2026-08-20T00:45:38Z"
+          }]
+        }
+      }]
+    }
+    "#;
+    let succeeded = r#"
+    {
+      "items": [{
+        "metadata": {"name": "signoz-platform"},
+        "status": {
+          "order": 1,
+          "updateStatus": "ok",
+          "runtimeStatus": "ok",
+          "buildHistory": [
+            {"finishTime": "2026-08-20T02:01:25Z"},
+            {
+              "error": "apply command timed out after 10m0s",
+              "finishTime": "2026-08-20T00:45:38Z"
+            }
+          ]
+        }
+      }]
+    }
+    "#;
+
+    let retrying = parse_ui_resources(retrying).unwrap();
+    let succeeded = parse_ui_resources(succeeded).unwrap();
+
+    assert_eq!(retrying.services[0].status, CircleStatus::Orange);
+    assert_eq!(retrying.services[0].detail, "building");
+    assert_eq!(succeeded.services[0].status, CircleStatus::Green);
+    assert_eq!(succeeded.services[0].detail, "healthy");
+}
+
+#[test]
 fn session_identity_uses_the_tilt_reported_tiltfile_and_pid() {
     let json = r#"
     {
