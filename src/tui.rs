@@ -19,7 +19,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
@@ -444,6 +444,10 @@ fn render(
     service_list: &mut ServiceListState,
 ) {
     let has_banner = model.warning().is_some() || confirm_down;
+    let metric_lines = service_metric_lines(model, frame.area().width);
+    let metrics_height = u16::try_from(metric_lines.len()).unwrap_or(u16::MAX).max(1);
+    let header_height = metrics_height.saturating_add(1);
+    let metrics = Paragraph::new(Text::from(metric_lines));
     let shortcut_lines = shortcut_legend(model, frame.area().width);
     let shortcut_height = u16::try_from(shortcut_lines.len())
         .unwrap_or(u16::MAX)
@@ -452,14 +456,14 @@ fn render(
         .direction(Direction::Vertical)
         .constraints(if has_banner {
             vec![
-                Constraint::Length(3),
+                Constraint::Length(header_height),
                 Constraint::Length(3),
                 Constraint::Min(2),
                 Constraint::Length(shortcut_height),
             ]
         } else {
             vec![
-                Constraint::Length(3),
+                Constraint::Length(header_height),
                 Constraint::Length(0),
                 Constraint::Min(2),
                 Constraint::Length(shortcut_height),
@@ -467,18 +471,31 @@ fn render(
         })
         .split(frame.area());
 
-    let title = Line::from(vec![
-        Span::styled("Tilt ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled(
+    let title_area = Rect::new(chunks[0].x, chunks[0].y, chunks[0].width, 1);
+    let metrics_area = Rect::new(
+        chunks[0].x,
+        chunks[0].y.saturating_add(1),
+        chunks[0].width,
+        metrics_height,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "Tilt",
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        )),
+        title_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(
             overall_label(model.overall_status()),
             Style::default().fg(overall_color(model.overall_status())),
-        ),
-        Span::raw(format!("  {}", model.project.root.display())),
-    ]);
-    frame.render_widget(
-        Paragraph::new(title).block(Block::default().borders(Borders::ALL)),
-        chunks[0],
+        ))
+        .alignment(Alignment::Right),
+        title_area,
     );
+    frame.render_widget(metrics, metrics_area);
 
     if has_banner {
         let message = if confirm_down {
@@ -545,6 +562,58 @@ fn render(
         Paragraph::new(Text::from(shortcut_lines)).wrap(Wrap { trim: true }),
         chunks[3],
     );
+}
+
+fn service_metric_lines(model: &DashboardModel, width: u16) -> Vec<Line<'static>> {
+    let mut healthy = 0;
+    let mut building = 0;
+    let mut failed = 0;
+    let mut inactive = 0;
+    for service in &model.services {
+        match service.status {
+            CircleStatus::Green => healthy += 1,
+            CircleStatus::Orange => building += 1,
+            CircleStatus::Red => failed += 1,
+            CircleStatus::Grey => inactive += 1,
+        }
+    }
+    let values = [
+        ("Services", model.services.len()),
+        ("Healthy", healthy),
+        ("Building", building),
+        ("Failed", failed),
+        ("Inactive", inactive),
+    ];
+    let separator = Span::styled(" │ ", Style::default().fg(Color::Rgb(72, 72, 72)));
+    let mut lines = Vec::new();
+    let mut spans = Vec::new();
+    let mut line_width = 0;
+    for (label, value) in values {
+        let entry = vec![
+            Span::styled(format!("{label}: "), Style::default().fg(Color::DarkGray)),
+            Span::styled(value.to_string(), Style::default().fg(Color::Gray)),
+        ];
+        let entry_width = Line::from(entry.clone()).width();
+        let separator_width = if spans.is_empty() {
+            0
+        } else {
+            separator.width()
+        };
+        if !spans.is_empty() && line_width + separator_width + entry_width > usize::from(width) {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            line_width = 0;
+        }
+        if !spans.is_empty() {
+            spans.push(separator.clone());
+            line_width += separator.width();
+        }
+        spans.extend(entry);
+        line_width += entry_width;
+    }
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 fn shortcut_legend(model: &DashboardModel, width: u16) -> Vec<Line<'static>> {
@@ -780,5 +849,99 @@ mod tests {
             assert!(rendered.contains(shortcut), "missing shortcut: {shortcut}");
         }
         assert!(rendered.contains("frontend"));
+    }
+
+    #[test]
+    fn compact_header_shows_status_and_unique_service_totals_without_a_card() {
+        let project = Project {
+            root: PathBuf::from("/project"),
+            tiltfile: Some(PathBuf::from("/project/Tiltfile")),
+        };
+        let mut model = DashboardModel::new(project, PathBuf::from("/state"));
+        model.overall_status = OverallStatus::Running;
+        model.services = [
+            ("healthy", CircleStatus::Green),
+            ("building", CircleStatus::Orange),
+            ("failed", CircleStatus::Red),
+            ("inactive", CircleStatus::Grey),
+        ]
+        .into_iter()
+        .map(|(name, status)| Service {
+            name: name.to_owned(),
+            status,
+            detail: name.to_owned(),
+        })
+        .collect();
+        model.groups = vec![ResourceGroup {
+            name: "all".to_owned(),
+            status: CircleStatus::Red,
+            services: model.services.clone(),
+        }];
+        let mut list_state = ServiceListState::default();
+        list_state.sync(&model.groups);
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &model, false, &mut list_state))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer_text(&terminal);
+
+        assert_eq!(buffer[(0, 0)].symbol(), "T");
+        assert!(rendered.contains("Tilt"));
+        assert!(rendered.contains("running"));
+        assert!(rendered.contains("Services: 4"));
+        assert!(rendered.contains("Healthy: 1"));
+        assert!(rendered.contains("Building: 1"));
+        assert!(rendered.contains("Failed: 1"));
+        assert!(rendered.contains("Inactive: 1"));
+    }
+
+    #[test]
+    fn compact_header_metrics_wrap_without_clipping_in_a_narrow_panel() {
+        let project = Project {
+            root: PathBuf::from("/project"),
+            tiltfile: Some(PathBuf::from("/project/Tiltfile")),
+        };
+        let mut model = DashboardModel::new(project, PathBuf::from("/state"));
+        model.overall_status = OverallStatus::Running;
+        model.services = [
+            CircleStatus::Green,
+            CircleStatus::Orange,
+            CircleStatus::Red,
+            CircleStatus::Grey,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, status)| Service {
+            name: format!("service-{index}"),
+            status,
+            detail: "status".to_owned(),
+        })
+        .collect();
+        model.groups = vec![ResourceGroup {
+            name: "all".to_owned(),
+            status: CircleStatus::Red,
+            services: model.services.clone(),
+        }];
+        let mut list_state = ServiceListState::default();
+        list_state.sync(&model.groups);
+        let mut terminal = Terminal::new(TestBackend::new(38, 18)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &model, false, &mut list_state))
+            .unwrap();
+        let rendered = buffer_text(&terminal);
+
+        for metric in [
+            "Services: 4",
+            "Healthy: 1",
+            "Building: 1",
+            "Failed: 1",
+            "Inactive: 1",
+        ] {
+            assert!(rendered.contains(metric), "missing metric: {metric}");
+        }
+        assert!(rendered.contains("service-0"));
     }
 }
