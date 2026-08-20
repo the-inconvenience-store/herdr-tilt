@@ -78,6 +78,7 @@ fi
     assert_eq!(model.services.len(), 1);
     assert_eq!(model.services[0].name, "api");
     assert_eq!(model.services[0].status, CircleStatus::Green);
+    assert!(!model.can_start());
     assert!(model.can_stop());
 }
 
@@ -117,6 +118,7 @@ fi
     assert_eq!(model.overall_status(), OverallStatus::Running);
     assert_eq!(model.services.len(), 1);
     assert_eq!(model.services[0].name, "manual-api");
+    assert!(!model.can_start());
 }
 
 #[test]
@@ -224,6 +226,7 @@ fn dashboard_start_invokes_the_retained_herdr_action() {
         ["plugin", "action", "invoke", "herdr.tilt.run"]
     );
     assert_eq!(model.overall_status(), OverallStatus::Starting);
+    assert!(!model.can_start());
 }
 
 #[test]

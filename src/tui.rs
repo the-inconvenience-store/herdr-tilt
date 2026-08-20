@@ -44,6 +44,20 @@ enum SelectedServiceAction {
     ToggleEnabled,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DownConfirmationDecision {
+    Confirm,
+    Cancel,
+}
+
+fn down_confirmation_decision(key: KeyCode) -> Option<DownConfirmationDecision> {
+    match key {
+        KeyCode::Char('y' | 'Y') => Some(DownConfirmationDecision::Confirm),
+        KeyCode::Char('n' | 'N') => Some(DownConfirmationDecision::Cancel),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default)]
 struct ServiceListState {
     inner: ListState,
@@ -193,7 +207,11 @@ impl DashboardModel {
     }
 
     pub fn can_start(&self) -> bool {
-        self.project.tiltfile.is_some() && self.overall_status != OverallStatus::Running
+        self.project.tiltfile.is_some()
+            && matches!(
+                self.overall_status,
+                OverallStatus::Stopped | OverallStatus::Failed
+            )
     }
 
     pub fn can_stop(&self) -> bool {
@@ -453,8 +471,21 @@ pub fn run_from_env() -> Result<()> {
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if confirm_down {
+            match down_confirmation_decision(key.code) {
+                Some(DownConfirmationDecision::Confirm) => {
+                    confirm_down = false;
+                    if let Err(error) = model.stop_with_binary(&binary) {
+                        model.set_warning(error.to_string());
+                    }
+                    last_refresh = Instant::now() - Duration::from_secs(2);
+                }
+                Some(DownConfirmationDecision::Cancel) => confirm_down = false,
+                None => {}
+            }
+            continue;
+        }
         if service_list.handle_key(key.code, &model.groups) {
-            confirm_down = false;
             continue;
         }
         if let Some((action, service)) =
@@ -483,13 +514,6 @@ pub fn run_from_env() -> Result<()> {
                 if let Err(error) = model.start_with_herdr(&herdr) {
                     model.set_warning(error.to_string());
                 }
-            }
-            KeyCode::Char('d') if model.can_stop() && confirm_down => {
-                confirm_down = false;
-                if let Err(error) = model.stop_with_binary(&binary) {
-                    model.set_warning(error.to_string());
-                }
-                last_refresh = Instant::now() - Duration::from_secs(2);
             }
             KeyCode::Char('d') if model.can_stop() => confirm_down = true,
             KeyCode::Char('r') => {
@@ -533,15 +557,17 @@ fn render(
     confirm_down: bool,
     service_list: &mut ServiceListState,
 ) {
-    let has_banner = model.warning().is_some() || confirm_down;
+    let has_banner = model.warning().is_some();
     let metric_lines = service_metric_lines(model, frame.area().width);
     let metrics_height = u16::try_from(metric_lines.len()).unwrap_or(u16::MAX).max(1);
     let header_height = metrics_height;
     let metrics = Paragraph::new(Text::from(metric_lines));
-    let shortcut_lines = shortcut_legend(model, frame.area().width);
-    let shortcut_height = u16::try_from(shortcut_lines.len())
-        .unwrap_or(u16::MAX)
-        .max(1);
+    let footer_lines = if confirm_down {
+        down_confirmation_footer(frame.area().width)
+    } else {
+        shortcut_legend(model, frame.area().width)
+    };
+    let footer_height = u16::try_from(footer_lines.len()).unwrap_or(u16::MAX).max(1);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if has_banner {
@@ -549,14 +575,14 @@ fn render(
                 Constraint::Length(header_height),
                 Constraint::Length(3),
                 Constraint::Min(2),
-                Constraint::Length(shortcut_height),
+                Constraint::Length(footer_height),
             ]
         } else {
             vec![
                 Constraint::Length(header_height),
                 Constraint::Length(0),
                 Constraint::Min(2),
-                Constraint::Length(shortcut_height),
+                Constraint::Length(footer_height),
             ]
         })
         .split(frame.area());
@@ -572,13 +598,8 @@ fn render(
     );
 
     if has_banner {
-        let message = if confirm_down {
-            "Press d again to stop Tilt and clean up its resources"
-        } else {
-            model.warning().unwrap_or_default()
-        };
         frame.render_widget(
-            Paragraph::new(message)
+            Paragraph::new(model.warning().unwrap_or_default())
                 .style(Style::default().fg(Color::Yellow))
                 .wrap(Wrap { trim: true })
                 .block(Block::default().borders(Borders::ALL).title("Warning")),
@@ -631,7 +652,7 @@ fn render(
     );
 
     frame.render_widget(
-        Paragraph::new(Text::from(shortcut_lines)).wrap(Wrap { trim: true }),
+        Paragraph::new(Text::from(footer_lines)).wrap(Wrap { trim: true }),
         chunks[3],
     );
 }
@@ -735,6 +756,50 @@ fn shortcut_legend(model: &DashboardModel, width: u16) -> Vec<Line<'static>> {
             separator.width()
         };
 
+        if !spans.is_empty() && line_width + separator_width + entry_width > usize::from(width) {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            line_width = 0;
+        }
+        if !spans.is_empty() {
+            spans.push(separator.clone());
+            line_width += separator.width();
+        }
+        spans.extend(entry);
+        line_width += entry_width;
+    }
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+fn down_confirmation_footer(width: u16) -> Vec<Line<'static>> {
+    let entries = [
+        vec![Span::styled(
+            "Stop Tilt and clean up its resources?",
+            Style::default().fg(Color::Yellow),
+        )],
+        vec![
+            Span::styled("y", Style::default().fg(Color::Gray)),
+            Span::styled(" yes", Style::default().fg(Color::DarkGray)),
+        ],
+        vec![
+            Span::styled("n", Style::default().fg(Color::Gray)),
+            Span::styled(" no", Style::default().fg(Color::DarkGray)),
+        ],
+    ];
+    let separator = Span::styled(" │ ", Style::default().fg(Color::Rgb(72, 72, 72)));
+    let mut lines = Vec::new();
+    let mut spans = Vec::new();
+    let mut line_width = 0;
+
+    for entry in entries {
+        let entry_width = Line::from(entry.clone()).width();
+        let separator_width = if spans.is_empty() {
+            0
+        } else {
+            separator.width()
+        };
         if !spans.is_empty() && line_width + separator_width + entry_width > usize::from(width) {
             lines.push(Line::from(std::mem::take(&mut spans)));
             line_width = 0;
@@ -998,6 +1063,46 @@ mod tests {
         assert!(!rendered.contains("← collapse"));
         assert!(!rendered.contains("→ expand"));
         assert!(rendered.contains("frontend"));
+    }
+
+    #[test]
+    fn down_confirmation_replaces_the_shortcut_footer_with_yes_or_no() {
+        let project = Project {
+            root: PathBuf::from("/project"),
+            tiltfile: Some(PathBuf::from("/project/Tiltfile")),
+        };
+        let mut model = DashboardModel::new(project, PathBuf::from("/state"));
+        model.overall_status = OverallStatus::Running;
+        model.groups = vec![group("apps", "frontend")];
+        model.services = model.groups[0].services.clone();
+        let mut list_state = ServiceListState::default();
+        list_state.sync(&model.groups);
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &model, true, &mut list_state))
+            .unwrap();
+        let rendered = buffer_text(&terminal);
+
+        assert!(rendered.contains("Stop Tilt and clean up its resources?"));
+        assert!(rendered.contains("y yes"));
+        assert!(rendered.contains("n no"));
+        assert!(!rendered.contains("q close"));
+        assert!(!rendered.contains("Press d again"));
+    }
+
+    #[test]
+    fn down_confirmation_requires_an_explicit_yes_or_no() {
+        assert_eq!(
+            down_confirmation_decision(KeyCode::Char('y')),
+            Some(DownConfirmationDecision::Confirm)
+        );
+        assert_eq!(
+            down_confirmation_decision(KeyCode::Char('n')),
+            Some(DownConfirmationDecision::Cancel)
+        );
+        assert_eq!(down_confirmation_decision(KeyCode::Char('d')), None);
+        assert_eq!(down_confirmation_decision(KeyCode::Esc), None);
     }
 
     #[test]

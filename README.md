@@ -61,7 +61,8 @@ opens a right-hand split when no dashboard exists.
 | `t` | Trigger a rebuild of the selected service |
 | `e` | Enable or disable the selected service |
 | `u` | Start a retained `tilt up` session |
-| `d`, `d` | Confirm, stop Tilt, and run `tilt down` |
+| `d`, then `y` | Confirm, stop Tilt, and run `tilt down` |
+| `n` | Cancel a pending Down confirmation |
 | `r` | Refresh immediately |
 | `q` or `Esc` | Close the dashboard without stopping Tilt |
 
