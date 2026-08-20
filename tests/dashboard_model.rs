@@ -225,3 +225,114 @@ fn dashboard_start_invokes_the_retained_herdr_action() {
     );
     assert_eq!(model.overall_status(), OverallStatus::Starting);
 }
+
+#[test]
+fn dashboard_triggers_a_resource_on_the_active_tilt_port() {
+    let workspace = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let tiltfile = workspace.path().join("Tiltfile");
+    fs::write(&tiltfile, "").unwrap();
+    let project = Project {
+        root: workspace.path().canonicalize().unwrap(),
+        tiltfile: Some(tiltfile.canonicalize().unwrap()),
+    };
+    let session_path = record_path(state.path(), project.tiltfile.as_ref().unwrap());
+    fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+    fs::write(
+        session_path,
+        serde_json::to_vec(&SessionRecord {
+            tiltfile: project.tiltfile.clone().unwrap(),
+            project_root: project.root.clone(),
+            port: 41234,
+            runner_pid: 320,
+            tilt_pid: 321,
+            started_unix_ms: 1234,
+            phase: SessionPhase::Running,
+            exit_code: None,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let capture = workspace.path().join("tilt-args");
+    let fake_tilt = workspace.path().join("tilt");
+    fs::write(
+        &fake_tilt,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = "trigger" ]; then
+  printf '%s\n' "$@" > '{}'
+elif [ "$2" = "sessions" ]; then
+  printf '%s\n' '{{"items":[{{"spec":{{"tiltfilePath":"{}"}},"status":{{"pid":321,"startTime":"2026-08-20T01:02:03Z"}}}}]}}'
+else
+  printf '%s\n' '{{"items":[{{"metadata":{{"name":"api"}},"status":{{"order":1,"updateStatus":"ok","runtimeStatus":"ok"}}}}]}}'
+fi
+"#,
+            capture.display(),
+            project.tiltfile.as_ref().unwrap().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut model = DashboardModel::new(project, state.path().to_path_buf());
+    model.refresh_with_tilt(&fake_tilt).unwrap();
+
+    model.trigger_service_with_tilt(&fake_tilt, "api").unwrap();
+
+    assert_eq!(
+        fs::read_to_string(capture)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["trigger", "api", "--port", "41234"]
+    );
+}
+
+#[test]
+fn dashboard_toggles_resources_between_enabled_and_disabled() {
+    let workspace = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let tiltfile = workspace.path().join("Tiltfile");
+    fs::write(&tiltfile, "").unwrap();
+    let project = Project {
+        root: workspace.path().canonicalize().unwrap(),
+        tiltfile: Some(tiltfile.canonicalize().unwrap()),
+    };
+    let capture = workspace.path().join("tilt-calls");
+    let fake_tilt = workspace.path().join("tilt");
+    fs::write(
+        &fake_tilt,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = "enable" ] || [ "$1" = "disable" ]; then
+  printf '%s\n' "$*" >> '{}'
+elif [ "$2" = "sessions" ]; then
+  printf '%s\n' '{{"items":[{{"spec":{{"tiltfilePath":"{}"}},"status":{{"pid":321,"startTime":"2026-08-20T01:02:03Z"}}}}]}}'
+else
+  printf '%s\n' '{{"items":[
+    {{"metadata":{{"name":"api"}},"status":{{"order":1,"updateStatus":"ok","runtimeStatus":"ok"}}}},
+    {{"metadata":{{"name":"worker"}},"status":{{"order":2,"disableStatus":{{"state":"Disabled"}}}}}}
+  ]}}'
+fi
+"#,
+            capture.display(),
+            project.tiltfile.as_ref().unwrap().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut model = DashboardModel::new(project, state.path().to_path_buf());
+    model.refresh_with_tilt(&fake_tilt).unwrap();
+    let api = model.services[0].clone();
+    let worker = model.services[1].clone();
+
+    model.toggle_service_with_tilt(&fake_tilt, &api).unwrap();
+    model.toggle_service_with_tilt(&fake_tilt, &worker).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(capture)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["disable api --port 10350", "enable worker --port 10350"]
+    );
+}

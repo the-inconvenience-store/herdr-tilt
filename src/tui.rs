@@ -38,6 +38,12 @@ enum ServiceNavigation {
     End,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectedServiceAction {
+    Trigger,
+    ToggleEnabled,
+}
+
 #[derive(Debug, Default)]
 struct ServiceListState {
     inner: ListState,
@@ -114,6 +120,23 @@ impl ServiceListState {
             _ => return false,
         }
         true
+    }
+
+    fn selected_service_action<'a>(
+        &self,
+        key: KeyCode,
+        groups: &'a [ResourceGroup],
+    ) -> Option<(SelectedServiceAction, &'a Service)> {
+        let action = match key {
+            KeyCode::Char('t') => SelectedServiceAction::Trigger,
+            KeyCode::Char('e') => SelectedServiceAction::ToggleEnabled,
+            _ => return None,
+        };
+        let selected = self.inner.selected()?;
+        match self.visible_rows(groups).get(selected)? {
+            ServiceListRow::Service(service) => Some((action, service)),
+            ServiceListRow::Group(_) => None,
+        }
     }
 }
 
@@ -321,6 +344,70 @@ impl DashboardModel {
         Ok(())
     }
 
+    pub fn trigger_service_with_tilt(
+        &self,
+        tilt: impl AsRef<std::ffi::OsStr>,
+        service_name: &str,
+    ) -> Result<()> {
+        if self.overall_status != OverallStatus::Running
+            || !self
+                .services
+                .iter()
+                .any(|service| service.name == service_name)
+        {
+            bail!("Tilt service cannot be triggered in the current dashboard state");
+        }
+        let port = load_session(&self.project, &self.state_dir)
+            .filter(|session| session.phase == SessionPhase::Running)
+            .map_or(DEFAULT_TILT_PORT, |session| session.port);
+        let output = Command::new(tilt)
+            .args(["trigger", service_name, "--port", &port.to_string()])
+            .output()
+            .with_context(|| format!("trigger Tilt service {service_name}"))?;
+        if !output.status.success() {
+            bail!(
+                "Could not trigger {service_name}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    pub fn toggle_service_with_tilt(
+        &self,
+        tilt: impl AsRef<std::ffi::OsStr>,
+        service: &Service,
+    ) -> Result<()> {
+        if self.overall_status != OverallStatus::Running
+            || !self
+                .services
+                .iter()
+                .any(|candidate| candidate.name == service.name)
+        {
+            bail!("Tilt service cannot be toggled in the current dashboard state");
+        }
+        let action = if service.disabled {
+            "enable"
+        } else {
+            "disable"
+        };
+        let port = load_session(&self.project, &self.state_dir)
+            .filter(|session| session.phase == SessionPhase::Running)
+            .map_or(DEFAULT_TILT_PORT, |session| session.port);
+        let output = Command::new(tilt)
+            .args([action, &service.name, "--port", &port.to_string()])
+            .output()
+            .with_context(|| format!("{action} Tilt service {}", service.name))?;
+        if !output.status.success() {
+            bail!(
+                "Could not {action} {}: {}",
+                service.name,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
     fn set_warning(&mut self, warning: impl Into<String>) {
         self.warning = Some(warning.into());
     }
@@ -368,6 +455,25 @@ pub fn run_from_env() -> Result<()> {
         }
         if service_list.handle_key(key.code, &model.groups) {
             confirm_down = false;
+            continue;
+        }
+        if let Some((action, service)) =
+            service_list.selected_service_action(key.code, &model.groups)
+        {
+            let service = service.clone();
+            confirm_down = false;
+            let result = match action {
+                SelectedServiceAction::Trigger => {
+                    model.trigger_service_with_tilt(&tilt, &service.name)
+                }
+                SelectedServiceAction::ToggleEnabled => {
+                    model.toggle_service_with_tilt(&tilt, &service)
+                }
+            };
+            if let Err(error) = result {
+                model.set_warning(error.to_string());
+            }
+            last_refresh = Instant::now() - Duration::from_secs(2);
             continue;
         }
         match key.code {
@@ -600,6 +706,8 @@ fn shortcut_legend(model: &DashboardModel, width: u16) -> Vec<Line<'static>> {
         ("pg↑/pg↓", "page", navigation_enabled),
         ("home/end", "jump", navigation_enabled),
         ("↵/space", "toggle", navigation_enabled),
+        ("t", "trigger", navigation_enabled),
+        ("e", "enable/disable", navigation_enabled),
         ("u", "up", model.can_start()),
         ("d", "down", model.can_stop()),
         ("r", "refresh", true),
@@ -695,6 +803,7 @@ mod tests {
                 name: service.to_owned(),
                 status: CircleStatus::Green,
                 detail: "healthy".to_owned(),
+                disabled: false,
             }],
         }
     }
@@ -725,6 +834,7 @@ mod tests {
                     name: format!("service-{index}"),
                     status: CircleStatus::Green,
                     detail: "healthy".to_owned(),
+                    disabled: false,
                 })
                 .collect(),
         }];
@@ -824,6 +934,38 @@ mod tests {
     }
 
     #[test]
+    fn service_action_keys_target_only_the_selected_service() {
+        let groups = vec![group("apps", "frontend")];
+        let mut list_state = ServiceListState::default();
+        list_state.sync(&groups);
+
+        assert!(
+            list_state
+                .selected_service_action(KeyCode::Char('t'), &groups)
+                .is_none()
+        );
+
+        list_state.navigate(ServiceNavigation::Down, &groups);
+        let (action, service) = list_state
+            .selected_service_action(KeyCode::Char('t'), &groups)
+            .unwrap();
+        assert_eq!(action, SelectedServiceAction::Trigger);
+        assert_eq!(service.name, "frontend");
+        assert_eq!(
+            list_state
+                .selected_service_action(KeyCode::Char('e'), &groups)
+                .unwrap()
+                .0,
+            SelectedServiceAction::ToggleEnabled
+        );
+        assert!(
+            list_state
+                .selected_service_action(KeyCode::Char('x'), &groups)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn shortcut_legend_wraps_without_clipping_in_a_narrow_panel() {
         let project = Project {
             root: PathBuf::from("/project"),
@@ -844,6 +986,8 @@ mod tests {
         for shortcut in [
             "↑/↓ nav",
             "↵/space toggle",
+            "t trigger",
+            "e enable/disable",
             "u up",
             "d down",
             "r refresh",
@@ -875,6 +1019,7 @@ mod tests {
             name: name.to_owned(),
             status,
             detail: name.to_owned(),
+            disabled: false,
         })
         .collect();
         model.groups = vec![ResourceGroup {
@@ -928,6 +1073,7 @@ mod tests {
             name: format!("service-{index}"),
             status,
             detail: "status".to_owned(),
+            disabled: false,
         })
         .collect();
         model.groups = vec![ResourceGroup {

@@ -17,6 +17,7 @@ pub struct Service {
     pub name: String,
     pub status: CircleStatus,
     pub detail: String,
+    pub disabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +137,11 @@ pub fn parse_ui_resources(json: &str) -> Result<DashboardSnapshot> {
             name: resource.metadata.name,
             status,
             detail,
+            disabled: resource
+                .status
+                .disable_status
+                .state
+                .eq_ignore_ascii_case("disabled"),
         };
         let order = resource.status.order;
         if resource.metadata.labels.is_empty() {

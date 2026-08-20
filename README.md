@@ -58,6 +58,8 @@ opens a right-hand split when no dashboard exists.
 | `Page Up`/`Page Down` | Move ten services at a time |
 | `Home`/`End` | Jump to the first or last service |
 | `Enter` or `Space` | Toggle the selected resource group |
+| `t` | Trigger a rebuild of the selected service |
+| `e` | Enable or disable the selected service |
 | `u` | Start a retained `tilt up` session |
 | `d`, `d` | Confirm, stop Tilt, and run `tilt down` |
 | `r` | Refresh immediately |
