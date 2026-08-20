@@ -21,6 +21,7 @@ enum Commands {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Commands::Open => herdr_tilt::open::open_panel_from_env(),
-        Commands::Tui | Commands::Run => Ok(()),
+        Commands::Run => herdr_tilt::session::run_from_env(),
+        Commands::Tui => Ok(()),
     }
 }
