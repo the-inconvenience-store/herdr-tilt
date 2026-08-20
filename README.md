@@ -84,8 +84,9 @@ PID against its state record. Before signaling a PID on Down, it verifies that
 the per-project lock is still held, preventing stale state from targeting a
 reused process ID.
 
-Plugin runtime data is stored under `HERDR_PLUGIN_STATE_DIR`. Find the plugin's
-user directories and inspect action logs with:
+Plugin runtime data is stored under the `HERDR_PLUGIN_STATE_DIR` that Herdr
+injects into plugin processes. Find the user-editable config directory and
+inspect action logs with:
 
 ```sh
 herdr plugin config-dir herdr.tilt
