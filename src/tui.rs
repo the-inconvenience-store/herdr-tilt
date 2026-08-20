@@ -19,7 +19,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
@@ -446,7 +446,7 @@ fn render(
     let has_banner = model.warning().is_some() || confirm_down;
     let metric_lines = service_metric_lines(model, frame.area().width);
     let metrics_height = u16::try_from(metric_lines.len()).unwrap_or(u16::MAX).max(1);
-    let header_height = metrics_height.saturating_add(1);
+    let header_height = metrics_height;
     let metrics = Paragraph::new(Text::from(metric_lines));
     let shortcut_lines = shortcut_legend(model, frame.area().width);
     let shortcut_height = u16::try_from(shortcut_lines.len())
@@ -471,31 +471,7 @@ fn render(
         })
         .split(frame.area());
 
-    let title_area = Rect::new(chunks[0].x, chunks[0].y, chunks[0].width, 1);
-    let metrics_area = Rect::new(
-        chunks[0].x,
-        chunks[0].y.saturating_add(1),
-        chunks[0].width,
-        metrics_height,
-    );
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            "Tilt",
-            Style::default()
-                .fg(Color::LightMagenta)
-                .add_modifier(Modifier::BOLD),
-        )),
-        title_area,
-    );
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            overall_label(model.overall_status()),
-            Style::default().fg(overall_color(model.overall_status())),
-        ))
-        .alignment(Alignment::Right),
-        title_area,
-    );
-    frame.render_widget(metrics, metrics_area);
+    frame.render_widget(metrics, chunks[0]);
 
     if has_banner {
         let message = if confirm_down {
@@ -584,15 +560,22 @@ fn service_metric_lines(model: &DashboardModel, width: u16) -> Vec<Line<'static>
         ("Failed", failed),
         ("Inactive", inactive),
     ];
+    let mut entries = vec![vec![Span::styled(
+        overall_label(model.overall_status()),
+        Style::default().fg(overall_color(model.overall_status())),
+    )]];
+    entries.extend(values.into_iter().map(|(label, value)| {
+        vec![
+            Span::styled(format!("{label}: "), Style::default().fg(Color::DarkGray)),
+            Span::styled(value.to_string(), Style::default().fg(Color::Gray)),
+        ]
+    }));
+
     let separator = Span::styled(" │ ", Style::default().fg(Color::Rgb(72, 72, 72)));
     let mut lines = Vec::new();
     let mut spans = Vec::new();
     let mut line_width = 0;
-    for (label, value) in values {
-        let entry = vec![
-            Span::styled(format!("{label}: "), Style::default().fg(Color::DarkGray)),
-            Span::styled(value.to_string(), Style::default().fg(Color::Gray)),
-        ];
+    for entry in entries {
         let entry_width = Line::from(entry.clone()).width();
         let separator_width = if spans.is_empty() {
             0
@@ -887,9 +870,11 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let rendered = buffer_text(&terminal);
 
-        assert_eq!(buffer[(0, 0)].symbol(), "T");
-        assert!(rendered.contains("Tilt"));
-        assert!(rendered.contains("running"));
+        let first_row = (0..80).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+        assert_eq!(buffer[(0, 0)].symbol(), "r");
+        assert!(!rendered.contains("Tilt"));
+        assert!(first_row.contains("Services: 4"));
+        assert!(first_row.contains("running"));
         assert!(rendered.contains("Services: 4"));
         assert!(rendered.contains("Healthy: 1"));
         assert!(rendered.contains("Building: 1"));
@@ -931,14 +916,19 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &model, false, &mut list_state))
             .unwrap();
+        let buffer = terminal.backend().buffer();
+        let first_row = (0..38).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
         let rendered = buffer_text(&terminal);
 
+        assert!(first_row.contains("running"));
+        assert!(first_row.contains("Services: 4"));
         for metric in [
             "Services: 4",
             "Healthy: 1",
             "Building: 1",
             "Failed: 1",
             "Inactive: 1",
+            "running",
         ] {
             assert!(rendered.contains(metric), "missing metric: {metric}");
         }
