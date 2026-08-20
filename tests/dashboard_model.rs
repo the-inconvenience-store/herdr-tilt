@@ -215,15 +215,17 @@ fn dashboard_start_invokes_the_retained_herdr_action() {
     };
     let capture = workspace.path().join("herdr-args");
     let fake_herdr = workspace.path().join("herdr");
+    let staged_herdr = workspace.path().join("herdr.staged");
     fs::write(
-        &fake_herdr,
+        &staged_herdr,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
             capture.display()
         ),
     )
     .unwrap();
-    fs::set_permissions(&fake_herdr, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&staged_herdr, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(staged_herdr, &fake_herdr).unwrap();
 
     let mut model = DashboardModel::new(project, state.path().to_path_buf());
     model.start_with_herdr(&fake_herdr).unwrap();
