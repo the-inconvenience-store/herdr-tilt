@@ -1,12 +1,13 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::process::{Command as StdCommand, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
+
+mod support;
 
 #[test]
 fn run_command_starts_tilt_and_records_the_session() {
@@ -24,7 +25,7 @@ fn run_command_starts_tilt_and_records_the_session() {
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\n",
     )
     .unwrap();
-    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+    support::publish_executable(&fake_tilt);
 
     let context = serde_json::json!({
         "workspace_id": "w1",
@@ -96,7 +97,7 @@ fi
 "#,
     )
     .unwrap();
-    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+    support::publish_executable(&fake_tilt);
 
     let context = serde_json::json!({
         "workspace_id": "w1",

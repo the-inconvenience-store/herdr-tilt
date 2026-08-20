@@ -120,6 +120,8 @@ impl InstallFixture {
 }
 
 fn write_executable(path: &Path, contents: &str) {
-    fs::write(path, contents).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    let staged = path.with_extension("staged");
+    fs::write(&staged, contents).unwrap();
+    fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(staged, path).unwrap();
 }

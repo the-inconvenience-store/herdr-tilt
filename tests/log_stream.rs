@@ -1,11 +1,12 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use herdr_tilt::logs::{LogBuffer, TiltLogStream};
+
+mod support;
 
 #[test]
 fn tilt_log_stream_merges_build_and_application_output() {
@@ -20,7 +21,7 @@ fn tilt_log_stream_merges_build_and_application_output() {
         ),
     )
     .unwrap();
-    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+    support::publish_executable(&fake_tilt);
     let mut stream = TiltLogStream::spawn(&fake_tilt, "api", 41234).unwrap();
     let mut logs = LogBuffer::with_limits(10, 80);
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -72,7 +73,7 @@ fn tilt_log_stream_bounds_a_single_unterminated_record_while_reading() {
         "#!/bin/sh\ni=0\nwhile [ $i -lt 20000 ]; do printf x; i=$((i + 1)); done\nprintf '\\n'\n",
     )
     .unwrap();
-    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+    support::publish_executable(&fake_tilt);
     let mut stream = TiltLogStream::spawn(&fake_tilt, "api", 10350).unwrap();
     let mut logs = LogBuffer::with_limits(10, 20_000);
     let deadline = Instant::now() + Duration::from_secs(2);

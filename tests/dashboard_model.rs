@@ -1,12 +1,13 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 
 use herdr_tilt::project::Project;
 use herdr_tilt::session::{SessionPhase, SessionRecord, record_path};
 use herdr_tilt::tilt::{CircleStatus, ServiceAction};
 use herdr_tilt::tui::{DashboardModel, OverallStatus};
+
+mod support;
 
 #[test]
 fn dashboard_without_tiltfile_warns_and_disables_controls() {
@@ -71,7 +72,7 @@ fi
         ),
     )
     .unwrap();
-    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+    support::publish_executable(&fake_tilt);
 
     let mut model = DashboardModel::new(project, state.path().to_path_buf());
     model.refresh_with_tilt(&fake_tilt).unwrap();
@@ -120,7 +121,7 @@ fi
         ),
     )
     .unwrap();
-    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+    support::publish_executable(&fake_tilt);
 
     let mut model = DashboardModel::new(project, state.path().to_path_buf());
     model.refresh_with_tilt(&fake_tilt).unwrap();
@@ -143,7 +144,7 @@ fn dashboard_without_a_default_tilt_api_remains_stopped() {
     };
     let fake_tilt = workspace.path().join("tilt");
     fs::write(&fake_tilt, "#!/bin/sh\nexit 1\n").unwrap();
-    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+    support::publish_executable(&fake_tilt);
 
     let mut model = DashboardModel::new(project, state.path().to_path_buf());
     model.refresh_with_tilt(&fake_tilt).unwrap();
@@ -193,7 +194,7 @@ fi
 "#,
     )
     .unwrap();
-    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+    support::publish_executable(&fake_tilt);
 
     let mut model = DashboardModel::new(project, state.path().to_path_buf());
     let error = model.refresh_with_tilt(&fake_tilt).unwrap_err();
@@ -215,17 +216,15 @@ fn dashboard_start_invokes_the_retained_herdr_action() {
     };
     let capture = workspace.path().join("herdr-args");
     let fake_herdr = workspace.path().join("herdr");
-    let staged_herdr = workspace.path().join("herdr.staged");
     fs::write(
-        &staged_herdr,
+        &fake_herdr,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
             capture.display()
         ),
     )
     .unwrap();
-    fs::set_permissions(&staged_herdr, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::rename(staged_herdr, &fake_herdr).unwrap();
+    support::publish_executable(&fake_herdr);
 
     let mut model = DashboardModel::new(project, state.path().to_path_buf());
     model.start_with_herdr(&fake_herdr).unwrap();
@@ -287,7 +286,7 @@ fi
         ),
     )
     .unwrap();
-    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+    support::publish_executable(&fake_tilt);
     let mut model = DashboardModel::new(project, state.path().to_path_buf());
     model.refresh_with_tilt(&fake_tilt).unwrap();
 
@@ -334,7 +333,7 @@ fi
         ),
     )
     .unwrap();
-    fs::set_permissions(&fake_tilt, fs::Permissions::from_mode(0o755)).unwrap();
+    support::publish_executable(&fake_tilt);
     let mut model = DashboardModel::new(project, state.path().to_path_buf());
     model.refresh_with_tilt(&fake_tilt).unwrap();
     let api = model.services[0].clone();

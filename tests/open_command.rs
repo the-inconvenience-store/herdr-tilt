@@ -1,9 +1,10 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 
 use assert_cmd::Command;
+
+mod support;
 
 #[test]
 fn open_command_opens_status_split_for_workspace() {
@@ -21,7 +22,7 @@ fn open_command_opens_status_split_for_workspace() {
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\nprintf '%s\\n' '{\"result\":{\"plugin_pane\":{\"pane\":{\"pane_id\":\"w1:p9\"}}}}'\n",
     )
     .unwrap();
-    fs::set_permissions(&fake_herdr, fs::Permissions::from_mode(0o755)).unwrap();
+    support::publish_executable(&fake_herdr);
 
     let context = serde_json::json!({
         "workspace_id": "w1",
@@ -96,7 +97,7 @@ fn repeated_open_focuses_the_saved_plugin_pane() {
         "#!/bin/sh\nprintf '%s' \"$1 $2 $3\" >> \"$CAPTURE\"\nshift 3\nprintf ' %s' \"$@\" >> \"$CAPTURE\"\nprintf '\\n' >> \"$CAPTURE\"\nif [ \"$1\" = 'open' ]; then :; fi\nprintf '%s\\n' '{\"result\":{\"plugin_pane\":{\"pane\":{\"pane_id\":\"w1:p9\"}}}}'\n",
     )
     .unwrap();
-    fs::set_permissions(&fake_herdr, fs::Permissions::from_mode(0o755)).unwrap();
+    support::publish_executable(&fake_herdr);
 
     let context = serde_json::json!({
         "workspace_id": "w1",
