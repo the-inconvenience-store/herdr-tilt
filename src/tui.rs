@@ -102,20 +102,6 @@ impl ServiceListState {
         self.sync(groups);
     }
 
-    fn collapse_selected_group(&mut self, groups: &[ResourceGroup]) {
-        if let Some(group) = self.selected_group_name(groups) {
-            self.collapsed.insert(group);
-            self.sync(groups);
-        }
-    }
-
-    fn expand_selected_group(&mut self, groups: &[ResourceGroup]) {
-        if let Some(group) = self.selected_group_name(groups) {
-            self.collapsed.remove(&group);
-            self.sync(groups);
-        }
-    }
-
     fn handle_key(&mut self, key: KeyCode, groups: &[ResourceGroup]) -> bool {
         match key {
             KeyCode::Up | KeyCode::Char('k') => self.navigate(ServiceNavigation::Up, groups),
@@ -125,8 +111,6 @@ impl ServiceListState {
             KeyCode::Home => self.navigate(ServiceNavigation::Home, groups),
             KeyCode::End => self.navigate(ServiceNavigation::End, groups),
             KeyCode::Enter | KeyCode::Char(' ') => self.toggle_selected_group(groups),
-            KeyCode::Left => self.collapse_selected_group(groups),
-            KeyCode::Right => self.expand_selected_group(groups),
             _ => return false,
         }
         true
@@ -606,8 +590,6 @@ fn shortcut_legend(model: &DashboardModel, width: u16) -> Vec<Line<'static>> {
         ("pg↑/pg↓", "page", navigation_enabled),
         ("home/end", "jump", navigation_enabled),
         ("↵/space", "toggle", navigation_enabled),
-        ("←", "collapse", navigation_enabled),
-        ("→", "expand", navigation_enabled),
         ("u", "up", model.can_start()),
         ("d", "down", model.can_stop()),
         ("r", "refresh", true),
@@ -787,17 +769,17 @@ mod tests {
     }
 
     #[test]
-    fn group_keys_collapse_expand_and_toggle_the_selected_header() {
+    fn group_toggle_keys_handle_the_selected_header_without_arrow_aliases() {
         let groups = vec![group("apps", "frontend")];
         let mut list_state = ServiceListState::default();
         list_state.sync(&groups);
 
-        assert!(list_state.handle_key(KeyCode::Left, &groups));
-        assert_eq!(list_state.visible_rows(&groups).len(), 1);
-        assert!(list_state.handle_key(KeyCode::Right, &groups));
-        assert_eq!(list_state.visible_rows(&groups).len(), 2);
         assert!(list_state.handle_key(KeyCode::Char(' '), &groups));
         assert_eq!(list_state.visible_rows(&groups).len(), 1);
+        assert!(list_state.handle_key(KeyCode::Enter, &groups));
+        assert_eq!(list_state.visible_rows(&groups).len(), 2);
+        assert!(!list_state.handle_key(KeyCode::Left, &groups));
+        assert!(!list_state.handle_key(KeyCode::Right, &groups));
         assert!(!list_state.handle_key(KeyCode::Char('u'), &groups));
     }
 
@@ -822,8 +804,6 @@ mod tests {
         for shortcut in [
             "↑/↓ nav",
             "↵/space toggle",
-            "← collapse",
-            "→ expand",
             "u up",
             "d down",
             "r refresh",
@@ -831,6 +811,8 @@ mod tests {
         ] {
             assert!(rendered.contains(shortcut), "missing shortcut: {shortcut}");
         }
+        assert!(!rendered.contains("← collapse"));
+        assert!(!rendered.contains("→ expand"));
         assert!(rendered.contains("frontend"));
     }
 

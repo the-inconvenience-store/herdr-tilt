@@ -58,7 +58,6 @@ opens a right-hand split when no dashboard exists.
 | `Page Up`/`Page Down` | Move ten services at a time |
 | `Home`/`End` | Jump to the first or last service |
 | `Enter` or `Space` | Toggle the selected resource group |
-| `←`/`→` | Collapse or expand the selected resource group |
 | `u` | Start a retained `tilt up` session |
 | `d`, `d` | Confirm, stop Tilt, and run `tilt down` |
 | `r` | Refresh immediately |
