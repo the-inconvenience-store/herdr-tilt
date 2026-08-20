@@ -1,6 +1,6 @@
 id = "herdr.tilt"
 name = "Tilt"
-version = "0.1.0"
+version = "0.1.1"
 min_herdr_version = "0.7.0"
 description = "Control and monitor Tilt services from a Herdr split pane."
 platforms = ["linux", "macos"]
