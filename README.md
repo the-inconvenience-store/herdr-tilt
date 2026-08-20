@@ -90,6 +90,7 @@ Services with Tilt endpoint links or custom resource-scoped UI buttons show a
 right-aligned `↗` marker (and an action count when there is more than one).
 Selecting the service expands that marker into an inline preview of its action
 titles.
+
 Press `a` to run the only action immediately or open a picker when multiple
 actions are available. Use `↑`/`↓` or `j`/`k` in the picker, `Enter` or `Space`
 to activate, and `q` or `Esc` to return. URL actions open in the system browser.
@@ -100,10 +101,14 @@ dedicated trigger and enable/disable controls.
 
 ## Live logs
 
-Press `l` on a service to replace the dashboard with its live Tilt log stream.
+Press `l` on a service to replace the dashboard with its live logs. For
+Kubernetes-backed resources, the viewer combines Tilt build output with direct
+`kubectl logs --follow --all-containers` stdout/stderr from active pods;
+local resources continue to use Tilt's combined build and runtime stream.
+Kubernetes lines are prefixed with `k8s │` and their pod/container identity.
 The viewer removes terminal escape sequences, expands JSON records, highlights
 warnings and errors, and remains anchored to the newest visual line while
-following.
+following. Set `KUBECTL_BIN_PATH` to override the `kubectl` executable.
 
 | Key | Action |
 | --- | --- |
@@ -118,8 +123,10 @@ following.
 
 For predictable memory use, scrollback is capped at 2,000 records, each record
 is capped at 8 KiB while it is read, and the reader-to-UI channel holds at most
-128 pending records. Closing the viewer terminates and reaps its `tilt logs`
-process while leaving Tilt itself running.
+128 pending records. Kubernetes history starts with the latest 200 lines per
+pod, and at most 16 pod streams are opened for one service. Closing the viewer
+terminates and reaps its `tilt logs` and `kubectl logs` processes while leaving
+Tilt and the workloads themselves running.
 
 ## Session behavior
 

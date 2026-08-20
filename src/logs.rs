@@ -6,11 +6,70 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 
 pub const DEFAULT_MAX_LOG_LINES: usize = 2_000;
 pub const DEFAULT_MAX_LOG_LINE_BYTES: usize = 8 * 1024;
 const LOG_CHANNEL_CAPACITY: usize = 128;
 const LOG_POLL_BATCH_SIZE: usize = 256;
+const MAX_KUBERNETES_LOG_STREAMS: usize = 16;
+const KUBERNETES_LOG_TAIL: usize = 200;
+
+#[derive(Deserialize)]
+struct KubernetesDiscovery {
+    #[serde(default)]
+    spec: KubernetesDiscoverySpec,
+    #[serde(default)]
+    status: KubernetesDiscoveryStatus,
+}
+
+#[derive(Default, Deserialize)]
+struct KubernetesDiscoverySpec {
+    #[serde(default)]
+    cluster: String,
+}
+
+#[derive(Default, Deserialize)]
+struct KubernetesDiscoveryStatus {
+    #[serde(default)]
+    pods: Vec<KubernetesPod>,
+}
+
+#[derive(Deserialize)]
+struct KubernetesPod {
+    name: String,
+    namespace: String,
+}
+
+#[derive(Deserialize)]
+struct TiltCluster {
+    #[serde(default)]
+    spec: TiltClusterSpec,
+}
+
+#[derive(Default, Deserialize)]
+struct TiltClusterSpec {
+    #[serde(default)]
+    connection: ClusterConnection,
+}
+
+#[derive(Default, Deserialize)]
+struct ClusterConnection {
+    #[serde(default)]
+    kubernetes: KubernetesConnection,
+}
+
+#[derive(Default, Deserialize)]
+struct KubernetesConnection {
+    #[serde(default)]
+    context: String,
+}
+
+struct KubernetesLogTarget {
+    pod: String,
+    namespace: String,
+    context: Option<String>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogNavigation {
@@ -246,40 +305,88 @@ enum LogMessage {
 }
 
 pub struct TiltLogStream {
-    child: Option<Child>,
+    children: Vec<Child>,
     receiver: Option<Receiver<LogMessage>>,
     readers: Vec<JoinHandle<()>>,
     open_readers: usize,
     last_error: Option<String>,
+    kubernetes_streams: usize,
 }
 
 impl TiltLogStream {
     pub fn spawn(tilt: impl AsRef<OsStr>, service_name: &str, port: u16) -> Result<Self> {
-        let mut child = Command::new(tilt)
-            .args([
-                "logs",
-                service_name,
-                "--follow",
-                "--port",
-                &port.to_string(),
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("stream logs for Tilt service {service_name}"))?;
-        let stdout = child.stdout.take().context("capture Tilt log output")?;
-        let stderr = child.stderr.take().context("capture Tilt log errors")?;
+        Self::spawn_with_kubectl(tilt, "kubectl", service_name, port)
+    }
+
+    pub fn spawn_with_kubectl(
+        tilt: impl AsRef<OsStr>,
+        kubectl: impl AsRef<OsStr>,
+        service_name: &str,
+        port: u16,
+    ) -> Result<Self> {
+        let tilt = tilt.as_ref();
+        let kubectl = kubectl.as_ref();
+        let targets = discover_kubernetes_targets(tilt, service_name, port);
         let (sender, receiver) = mpsc::sync_channel(LOG_CHANNEL_CAPACITY);
-        let readers = vec![
-            spawn_reader(stdout, sender.clone(), false),
-            spawn_reader(stderr, sender, true),
-        ];
+        let mut children = Vec::new();
+        let mut readers = Vec::new();
+
+        for target in targets.into_iter().take(MAX_KUBERNETES_LOG_STREAMS) {
+            let mut command = Command::new(kubectl);
+            if let Some(context) = target.context {
+                command.arg(format!("--context={context}"));
+            }
+            command.args([
+                "logs".to_owned(),
+                format!("pod/{}", target.pod),
+                format!("--namespace={}", target.namespace),
+                "--all-containers=true".to_owned(),
+                "--prefix=true".to_owned(),
+                "--follow".to_owned(),
+                format!("--tail={KUBERNETES_LOG_TAIL}"),
+                "--ignore-errors=true".to_owned(),
+            ]);
+            if let Ok((child, mut child_readers)) =
+                spawn_log_command(command, &sender, Some("k8s".to_owned()))
+            {
+                children.push(child);
+                readers.append(&mut child_readers);
+            }
+        }
+
+        let kubernetes_streams = children.len();
+        let source = if kubernetes_streams == 0 {
+            "all"
+        } else {
+            "build"
+        };
+        let mut command = Command::new(tilt);
+        command.args([
+            "logs",
+            service_name,
+            "--follow",
+            "--source",
+            source,
+            "--port",
+            &port.to_string(),
+        ]);
+        let (tilt_child, mut tilt_readers) = spawn_log_command(command, &sender, None)
+            .inspect_err(|_| {
+                for child in &mut children {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            })?;
+        children.push(tilt_child);
+        readers.append(&mut tilt_readers);
+        let open_readers = readers.len();
         Ok(Self {
-            child: Some(child),
+            children,
             receiver: Some(receiver),
             readers,
-            open_readers: 2,
+            open_readers,
             last_error: None,
+            kubernetes_streams,
         })
     }
 
@@ -318,19 +425,23 @@ impl TiltLogStream {
         if self.open_readers == 0 {
             return false;
         }
-        self.child
-            .as_mut()
-            .is_some_and(|child| child.try_wait().ok().flatten().is_none())
+        self.children
+            .iter_mut()
+            .any(|child| child.try_wait().ok().flatten().is_none())
     }
 
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
+
+    pub fn kubernetes_stream_count(&self) -> usize {
+        self.kubernetes_streams
+    }
 }
 
 impl Drop for TiltLogStream {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
+        for mut child in self.children.drain(..) {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -341,16 +452,97 @@ impl Drop for TiltLogStream {
     }
 }
 
+fn discover_kubernetes_targets(
+    tilt: &OsStr,
+    service_name: &str,
+    port: u16,
+) -> Vec<KubernetesLogTarget> {
+    let port = port.to_string();
+    let Ok(output) = Command::new(tilt)
+        .args([
+            "get",
+            "kubernetesdiscovery",
+            service_name,
+            "-o",
+            "json",
+            "--port",
+            &port,
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let Ok(discovery) = serde_json::from_slice::<KubernetesDiscovery>(&output.stdout) else {
+        return Vec::new();
+    };
+    let context = cluster_context(tilt, &discovery.spec.cluster, &port);
+    discovery
+        .status
+        .pods
+        .into_iter()
+        .filter(|pod| !pod.name.is_empty() && !pod.namespace.is_empty())
+        .map(|pod| KubernetesLogTarget {
+            pod: pod.name,
+            namespace: pod.namespace,
+            context: context.clone(),
+        })
+        .collect()
+}
+
+fn cluster_context(tilt: &OsStr, cluster_name: &str, port: &str) -> Option<String> {
+    if cluster_name.is_empty() {
+        return None;
+    }
+    let output = Command::new(tilt)
+        .args(["get", "cluster", cluster_name, "-o", "json", "--port", port])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let cluster = serde_json::from_slice::<TiltCluster>(&output.stdout).ok()?;
+    (!cluster.spec.connection.kubernetes.context.is_empty())
+        .then_some(cluster.spec.connection.kubernetes.context)
+}
+
+fn spawn_log_command(
+    mut command: Command,
+    sender: &SyncSender<LogMessage>,
+    prefix: Option<String>,
+) -> Result<(Child, Vec<JoinHandle<()>>)> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start log stream")?;
+    let stdout = child.stdout.take().context("capture log stream output")?;
+    let stderr = child.stderr.take().context("capture log stream errors")?;
+    let readers = vec![
+        spawn_reader(stdout, sender.clone(), false, prefix.clone()),
+        spawn_reader(stderr, sender.clone(), true, prefix),
+    ];
+    Ok((child, readers))
+}
+
 fn spawn_reader(
     pipe: impl io::Read + Send + 'static,
     sender: SyncSender<LogMessage>,
     stderr: bool,
+    prefix: Option<String>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut reader = BufReader::new(pipe);
         loop {
             match read_bounded_line(&mut reader, DEFAULT_MAX_LOG_LINE_BYTES) {
                 Ok(Some((text, truncated))) => {
+                    let text = if let Some(prefix) = prefix.as_ref() {
+                        format!("{prefix} │ {text}")
+                    } else {
+                        text
+                    };
                     if sender
                         .send(LogMessage::Line {
                             text,
