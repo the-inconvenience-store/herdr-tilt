@@ -50,8 +50,7 @@ herdr plugin link .
 
 ## Configure the opening key
 
-Herdr deliberately leaves plugin keys to the user. Add a binding to
-`~/.config/herdr/config.toml`:
+Add a binding to `~/.config/herdr/config.toml`:
 
 ```toml
 [[keys.command]]
