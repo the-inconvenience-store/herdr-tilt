@@ -18,7 +18,10 @@ use crate::tilt::{
     parse_ui_buttons, parse_ui_resources,
 };
 use anyhow::{Context, Result, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+    MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -33,6 +36,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 const SERVICE_PAGE_SIZE: usize = 10;
 const SERVICE_SELECTION_BG: Color = Color::Rgb(58, 58, 58);
 const DOWN_FEEDBACK_DURATION: Duration = Duration::from_millis(1200);
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ServiceNavigation {
@@ -104,6 +108,23 @@ impl ActionPicker {
             _ => ActionPickerEvent::None,
         }
     }
+
+    fn handle_mouse(&mut self, event: MouseEvent, actions: Rect) -> ActionPickerEvent {
+        if event.kind != MouseEventKind::Down(MouseButton::Left)
+            || event.column < actions.x
+            || event.column >= actions.right()
+            || event.row < actions.y
+            || event.row >= actions.bottom()
+        {
+            return ActionPickerEvent::None;
+        }
+        let index = self.state.offset() + usize::from(event.row - actions.y);
+        let Some(action) = self.actions.get(index).cloned() else {
+            return ActionPickerEvent::None;
+        };
+        self.state.select(Some(index));
+        ActionPickerEvent::Activate(action)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,6 +185,13 @@ fn refresh_dashboard(model: &mut DashboardModel, tilt: impl AsRef<std::ffi::OsSt
 struct ServiceListState {
     inner: ListState,
     collapsed: BTreeSet<String>,
+    last_group_click: Option<(usize, Instant)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouseInteraction {
+    None,
+    ServiceActions,
 }
 
 impl ServiceListState {
@@ -238,6 +266,56 @@ impl ServiceListState {
         true
     }
 
+    fn handle_mouse(
+        &mut self,
+        event: MouseEvent,
+        services: Rect,
+        groups: &[ResourceGroup],
+        now: Instant,
+    ) -> MouseInteraction {
+        if event.kind != MouseEventKind::Down(MouseButton::Left)
+            || event.column < services.x
+            || event.column >= services.right()
+            || event.row < services.y
+            || event.row >= services.bottom()
+        {
+            return MouseInteraction::None;
+        }
+        let index = self.inner.offset() + usize::from(event.row - services.y);
+        let visible_rows = self.visible_rows(groups);
+        let Some(row) = visible_rows.get(index) else {
+            return MouseInteraction::None;
+        };
+        let is_group = matches!(row, ServiceListRow::Group(_));
+        let action_badge_width = match row {
+            ServiceListRow::Service(service) if self.inner.selected() == Some(index) => {
+                service_action_badge(service, services.width, true)
+                    .map(|badge| u16::try_from(badge.chars().count()).unwrap_or(u16::MAX))
+            }
+            _ => None,
+        };
+        self.inner.select(Some(index));
+        if is_group {
+            let is_double_click = self.last_group_click.is_some_and(|(previous, clicked_at)| {
+                previous == index && now.duration_since(clicked_at) <= DOUBLE_CLICK_INTERVAL
+            });
+            if is_double_click {
+                self.toggle_selected_group(groups);
+                self.last_group_click = None;
+            } else {
+                self.last_group_click = Some((index, now));
+            }
+        } else {
+            self.last_group_click = None;
+            if action_badge_width
+                .is_some_and(|width| event.column >= services.right().saturating_sub(width))
+            {
+                return MouseInteraction::ServiceActions;
+            }
+        }
+        MouseInteraction::None
+    }
+
     fn selected_service_action<'a>(
         &self,
         key: KeyCode,
@@ -253,6 +331,14 @@ impl ServiceListState {
         let selected = self.inner.selected()?;
         match self.visible_rows(groups).get(selected)? {
             ServiceListRow::Service(service) => Some((action, service)),
+            ServiceListRow::Group(_) => None,
+        }
+    }
+
+    fn selected_service<'a>(&self, groups: &'a [ResourceGroup]) -> Option<&'a Service> {
+        let selected = self.inner.selected()?;
+        match self.visible_rows(groups).get(selected)? {
+            ServiceListRow::Service(service) => Some(service),
             ServiceListRow::Group(_) => None,
         }
     }
@@ -596,6 +682,24 @@ impl LogView {
     }
 }
 
+fn request_service_actions(
+    model: &mut DashboardModel,
+    service: &Service,
+    action_picker: &mut Option<ActionPicker>,
+) {
+    match service.actions.as_slice() {
+        [] => model.set_warning(format!("{} has no actions", service.name)),
+        [action] if !action.requires_confirmation() => {
+            if let Err(error) = activate_service_action(action, model.active_port()) {
+                model.set_warning(error.to_string());
+            }
+        }
+        actions => {
+            *action_picker = Some(ActionPicker::new(service.name.clone(), actions.to_vec()));
+        }
+    }
+}
+
 pub fn run_from_env() -> Result<()> {
     let context_json =
         env::var("HERDR_PLUGIN_CONTEXT_JSON").context("HERDR_PLUGIN_CONTEXT_JSON is not set")?;
@@ -646,13 +750,14 @@ pub fn run_from_env() -> Result<()> {
             if !event::poll(Duration::from_millis(100))? {
                 continue;
             }
-            let Event::Key(key) = event::read()? else {
-                continue;
-            };
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
+            let input = event::read()?;
             if pending_action.is_some() {
+                let Event::Key(key) = input else {
+                    continue;
+                };
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
                 match down_confirmation_decision(key.code) {
                     Some(DownConfirmationDecision::Confirm) => {
                         let action = pending_action.take().expect("pending action exists");
@@ -666,7 +771,25 @@ pub fn run_from_env() -> Result<()> {
                 }
                 continue;
             }
-            match picker.handle_key(key.code) {
+            let picker_event = match input {
+                Event::Key(key) if key.kind == KeyEventKind::Press => picker.handle_key(key.code),
+                Event::Mouse(mouse) => {
+                    let size = terminal.terminal.size()?;
+                    let area = Rect::new(0, 0, size.width, size.height);
+                    let footer = wrap_shortcuts(
+                        area.width,
+                        &[
+                            ("↑/↓/j/k", "nav", true),
+                            ("↵/space", "open", true),
+                            ("q/esc", "back", true),
+                        ],
+                    );
+                    let footer_height = u16::try_from(footer.len()).unwrap_or(u16::MAX).max(1);
+                    picker.handle_mouse(mouse, action_picker_areas(area, footer_height)[1])
+                }
+                _ => ActionPickerEvent::None,
+            };
+            match picker_event {
                 ActionPickerEvent::Back => action_picker = None,
                 ActionPickerEvent::Activate(action) if action.requires_confirmation() => {
                     pending_action = Some(action)
@@ -697,13 +820,14 @@ pub fn run_from_env() -> Result<()> {
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
+        let input = event::read()?;
         if down_footer == DownFooterState::Confirming {
+            let Event::Key(key) = input else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             match down_confirmation_decision(key.code) {
                 Some(DownConfirmationDecision::Confirm) => {
                     down_footer = DownFooterState::Stopping;
@@ -725,6 +849,25 @@ pub fn run_from_env() -> Result<()> {
                 }
                 None => {}
             }
+            continue;
+        }
+        if let Event::Mouse(mouse) = input {
+            let size = terminal.terminal.size()?;
+            let area = Rect::new(0, 0, size.width, size.height);
+            let services = dashboard_service_area(area, &model, down_footer, show_help);
+            if service_list.handle_mouse(mouse, services, &model.groups, Instant::now())
+                == MouseInteraction::ServiceActions
+                && let Some(service) = service_list.selected_service(&model.groups).cloned()
+            {
+                request_service_actions(&mut model, &service, &mut action_picker);
+                last_refresh = Instant::now() - Duration::from_secs(2);
+            }
+            continue;
+        }
+        let Event::Key(key) = input else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
             continue;
         }
         if toggle_help_for_key(key.code, &mut show_help) {
@@ -754,19 +897,7 @@ pub fn run_from_env() -> Result<()> {
                     continue;
                 }
                 SelectedServiceAction::Actions => {
-                    match service.actions.as_slice() {
-                        [] => model.set_warning(format!("{} has no actions", service.name)),
-                        [action] if !action.requires_confirmation() => {
-                            if let Err(error) = activate_service_action(action, model.active_port())
-                            {
-                                model.set_warning(error.to_string());
-                            }
-                        }
-                        actions => {
-                            action_picker =
-                                Some(ActionPicker::new(service.name.clone(), actions.to_vec()));
-                        }
-                    }
+                    request_service_actions(&mut model, &service, &mut action_picker);
                     last_refresh = Instant::now() - Duration::from_secs(2);
                     continue;
                 }
@@ -815,11 +946,19 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode().context("enable terminal raw mode")?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
             let _ = disable_raw_mode();
             return Err(error).context("enter alternate screen");
         }
-        let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+        let terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                let mut stdout = io::stdout();
+                let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
+                let _ = disable_raw_mode();
+                return Err(error).context("initialize terminal");
+            }
+        };
         Ok(Self { terminal })
     }
 }
@@ -827,7 +966,11 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         let _ = self.terminal.show_cursor();
     }
 }
@@ -1085,14 +1228,7 @@ fn render_action_picker(
         )
     };
     let footer_height = u16::try_from(footer.len()).unwrap_or(u16::MAX).max(1);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(footer_height),
-        ])
-        .split(frame.area());
+    let chunks = action_picker_areas(frame.area(), footer_height);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -1138,6 +1274,17 @@ fn render_action_picker(
         Paragraph::new(Text::from(footer)).wrap(Wrap { trim: true }),
         chunks[2],
     );
+}
+
+fn action_picker_areas(area: Rect, footer_height: u16) -> [Rect; 3] {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(footer_height),
+        ])
+        .areas(area)
 }
 
 fn action_confirmation_footer(width: u16, label: &str) -> Vec<Line<'static>> {
@@ -1216,24 +1363,7 @@ fn render(
         state => down_feedback_footer(state),
     };
     let footer_height = u16::try_from(footer_lines.len()).unwrap_or(u16::MAX).max(1);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(if has_banner {
-            vec![
-                Constraint::Length(header_height),
-                Constraint::Length(3),
-                Constraint::Min(2),
-                Constraint::Length(footer_height),
-            ]
-        } else {
-            vec![
-                Constraint::Length(header_height),
-                Constraint::Length(0),
-                Constraint::Min(2),
-                Constraint::Length(footer_height),
-            ]
-        })
-        .split(frame.area());
+    let chunks = dashboard_areas(frame.area(), has_banner, header_height, footer_height);
 
     frame.render_widget(metrics, chunks[0]);
     frame.render_widget(
@@ -1302,23 +1432,48 @@ fn render(
     );
 }
 
+fn dashboard_areas(
+    area: Rect,
+    has_banner: bool,
+    header_height: u16,
+    footer_height: u16,
+) -> [Rect; 4] {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Length(if has_banner { 3 } else { 0 }),
+            Constraint::Min(2),
+            Constraint::Length(footer_height),
+        ])
+        .areas(area)
+}
+
+fn dashboard_service_area(
+    area: Rect,
+    model: &DashboardModel,
+    down_footer: DownFooterState,
+    show_help: bool,
+) -> Rect {
+    let header_height = u16::try_from(service_metric_lines(model, area.width).len())
+        .unwrap_or(u16::MAX)
+        .max(1);
+    let footer_lines = match down_footer {
+        DownFooterState::Shortcuts => shortcut_legend(model, area.width, show_help),
+        DownFooterState::Confirming => down_confirmation_footer(area.width),
+        state => down_feedback_footer(state),
+    };
+    let footer_height = u16::try_from(footer_lines.len()).unwrap_or(u16::MAX).max(1);
+    dashboard_areas(
+        area,
+        model.warning().is_some(),
+        header_height,
+        footer_height,
+    )[2]
+}
+
 fn service_line(service: &Service, width: u16, selected: bool) -> Line<'static> {
-    let badge = (!service.actions.is_empty()).then(|| {
-        let badge_limit = usize::from(width).saturating_sub(10).max(1);
-        if selected && badge_limit > 2 {
-            let titles = service
-                .actions
-                .iter()
-                .map(ServiceAction::label)
-                .collect::<Vec<_>>()
-                .join(" · ");
-            format!("↗ {}", clip_with_ellipsis(&titles, badge_limit - 2))
-        } else if selected || service.actions.len() == 1 {
-            "↗".to_owned()
-        } else {
-            format!("↗ {}", service.actions.len())
-        }
-    });
+    let badge = service_action_badge(service, width, selected);
     let reserved = badge.as_ref().map_or(0, |badge| badge.chars().count() + 1);
     let left_width = usize::from(width).saturating_sub(reserved);
     let name_width = left_width.saturating_sub(4);
@@ -1350,6 +1505,25 @@ fn service_line(service: &Service, width: u16, selected: bool) -> Line<'static> 
         }
     }
     Line::from(spans)
+}
+
+fn service_action_badge(service: &Service, width: u16, selected: bool) -> Option<String> {
+    (!service.actions.is_empty()).then(|| {
+        let badge_limit = usize::from(width).saturating_sub(10).max(1);
+        if selected && badge_limit > 2 {
+            let titles = service
+                .actions
+                .iter()
+                .map(ServiceAction::label)
+                .collect::<Vec<_>>()
+                .join(" · ");
+            format!("↗ {}", clip_with_ellipsis(&titles, badge_limit - 2))
+        } else if selected || service.actions.len() == 1 {
+            "↗".to_owned()
+        } else {
+            format!("↗ {}", service.actions.len())
+        }
+    })
 }
 
 fn clip_with_ellipsis(value: &str, width: usize) -> String {
@@ -1697,6 +1871,102 @@ mod tests {
         assert!(!rendered.contains("frontend"));
         assert!(rendered.contains("infra"));
         assert!(rendered.contains("postgres"));
+    }
+
+    #[test]
+    fn clicking_a_service_row_selects_it() {
+        let groups = vec![group("apps", "frontend")];
+        let mut list_state = ServiceListState::default();
+        list_state.sync(&groups);
+        let services = Rect::new(0, 1, 60, 8);
+        let click = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 4,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        let interaction = list_state.handle_mouse(click, services, &groups, Instant::now());
+
+        assert_eq!(list_state.inner.selected(), Some(1));
+        assert_eq!(interaction, MouseInteraction::None);
+    }
+
+    #[test]
+    fn double_clicking_a_group_row_toggles_its_services() {
+        let groups = vec![group("apps", "frontend")];
+        let mut list_state = ServiceListState::default();
+        list_state.sync(&groups);
+        let services = Rect::new(0, 1, 60, 8);
+        let click = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 4,
+            row: 1,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let first = Instant::now();
+
+        list_state.handle_mouse(click, services, &groups, first);
+        list_state.handle_mouse(click, services, &groups, first + Duration::from_millis(200));
+
+        assert_eq!(list_state.visible_rows(&groups).len(), 1);
+        assert!(list_state.collapsed.contains("apps"));
+    }
+
+    #[test]
+    fn clicking_selected_service_action_badge_requests_its_actions() {
+        let mut apps = group("apps", "frontend");
+        apps.services[0].actions = vec![ServiceAction::Link {
+            label: "App".to_owned(),
+            url: "https://app.test".to_owned(),
+        }];
+        let groups = vec![apps];
+        let mut list_state = ServiceListState::default();
+        list_state.sync(&groups);
+        let services = Rect::new(0, 1, 40, 8);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 39,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        let first = list_state.handle_mouse(click, services, &groups, Instant::now());
+        let second = list_state.handle_mouse(click, services, &groups, Instant::now());
+
+        assert_eq!(first, MouseInteraction::None);
+        assert_eq!(list_state.inner.selected(), Some(1));
+        assert_eq!(second, MouseInteraction::ServiceActions);
+    }
+
+    #[test]
+    fn clicking_an_action_picker_row_activates_that_action() {
+        let expected = ServiceAction::Link {
+            label: "Admin".to_owned(),
+            url: "https://admin.test".to_owned(),
+        };
+        let mut picker = ActionPicker::new(
+            "frontend".to_owned(),
+            vec![
+                ServiceAction::Link {
+                    label: "App".to_owned(),
+                    url: "https://app.test".to_owned(),
+                },
+                expected.clone(),
+            ],
+        );
+        let actions = Rect::new(0, 1, 60, 6);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        let event = picker.handle_mouse(click, actions);
+
+        assert_eq!(event, ActionPickerEvent::Activate(expected));
+        assert_eq!(picker.state.selected(), Some(1));
     }
 
     #[test]

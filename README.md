@@ -1,6 +1,6 @@
 # herdr-tilt
 
-A keyboard-driven Tilt dashboard for Herdr. It opens beside the current pane,
+A keyboard-and-mouse Tilt dashboard for Herdr. It opens beside the current pane,
 shows every Tilt service with a four-color status circle, and starts or stops
 Tilt without tying the Tilt process to the dashboard pane.
 
@@ -91,6 +91,11 @@ opens a right-hand split when no dashboard exists.
 
 The dashboard opens even when the workspace has no `Tiltfile`, but displays a
 warning and disables Up and Down.
+
+Mouse controls are also available: click a service or group to select it,
+double-click a group row to fold or unfold it, and click the action preview on
+an already-selected service to run its sole action or open its action picker.
+Rows in the action picker can be clicked to run them.
 
 ## Status colors
 
