@@ -32,6 +32,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 
 const SERVICE_PAGE_SIZE: usize = 10;
 const SERVICE_SELECTION_BG: Color = Color::Rgb(58, 58, 58);
+const DOWN_FEEDBACK_DURATION: Duration = Duration::from_millis(1200);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ServiceNavigation {
@@ -109,6 +110,26 @@ impl ActionPicker {
 enum DownConfirmationDecision {
     Confirm,
     Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum DownFooterState {
+    #[default]
+    Shortcuts,
+    Confirming,
+    Stopping,
+    Stopped,
+    Cancelled,
+}
+
+impl From<bool> for DownFooterState {
+    fn from(confirming: bool) -> Self {
+        if confirming {
+            Self::Confirming
+        } else {
+            Self::Shortcuts
+        }
+    }
 }
 
 fn down_confirmation_decision(key: KeyCode) -> Option<DownConfirmationDecision> {
@@ -590,7 +611,8 @@ pub fn run_from_env() -> Result<()> {
     let mut model = DashboardModel::new_for_workspace(project, state_dir, workspace_id);
     let mut terminal = TerminalGuard::enter()?;
     let mut last_refresh = Instant::now() - Duration::from_secs(2);
-    let mut confirm_down = false;
+    let mut down_footer = DownFooterState::Shortcuts;
+    let mut down_feedback_until: Option<Instant> = None;
     let mut show_help = false;
     let mut service_list = ServiceListState::default();
     let mut log_view: Option<LogView> = None;
@@ -659,6 +681,10 @@ pub fn run_from_env() -> Result<()> {
             }
             continue;
         }
+        if down_feedback_until.is_some_and(|deadline| Instant::now() >= deadline) {
+            down_footer = DownFooterState::Shortcuts;
+            down_feedback_until = None;
+        }
         if last_refresh.elapsed() >= Duration::from_secs(1) {
             refresh_dashboard(&mut model, &tilt);
             last_refresh = Instant::now();
@@ -666,7 +692,7 @@ pub fn run_from_env() -> Result<()> {
         service_list.sync(&model.groups);
         terminal
             .terminal
-            .draw(|frame| render(frame, &model, confirm_down, show_help, &mut service_list))?;
+            .draw(|frame| render(frame, &model, down_footer, show_help, &mut service_list))?;
 
         if !event::poll(Duration::from_millis(100))? {
             continue;
@@ -677,16 +703,26 @@ pub fn run_from_env() -> Result<()> {
         if key.kind != KeyEventKind::Press {
             continue;
         }
-        if confirm_down {
+        if down_footer == DownFooterState::Confirming {
             match down_confirmation_decision(key.code) {
                 Some(DownConfirmationDecision::Confirm) => {
-                    confirm_down = false;
+                    down_footer = DownFooterState::Stopping;
+                    terminal.terminal.draw(|frame| {
+                        render(frame, &model, down_footer, show_help, &mut service_list)
+                    })?;
                     if let Err(error) = model.stop_with_binary(&binary) {
                         model.set_warning(error.to_string());
+                        down_footer = DownFooterState::Shortcuts;
+                    } else {
+                        down_footer = DownFooterState::Stopped;
+                        down_feedback_until = Some(Instant::now() + DOWN_FEEDBACK_DURATION);
                     }
                     last_refresh = Instant::now() - Duration::from_secs(2);
                 }
-                Some(DownConfirmationDecision::Cancel) => confirm_down = false,
+                Some(DownConfirmationDecision::Cancel) => {
+                    down_footer = DownFooterState::Cancelled;
+                    down_feedback_until = Some(Instant::now() + DOWN_FEEDBACK_DURATION);
+                }
                 None => {}
             }
             continue;
@@ -701,7 +737,8 @@ pub fn run_from_env() -> Result<()> {
             service_list.selected_service_action(key.code, &model.groups)
         {
             let service = service.clone();
-            confirm_down = false;
+            down_footer = DownFooterState::Shortcuts;
+            down_feedback_until = None;
             let result = match action {
                 SelectedServiceAction::Trigger => {
                     model.trigger_service_with_tilt(&tilt, &service.name)
@@ -743,23 +780,28 @@ pub fn run_from_env() -> Result<()> {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => break,
             KeyCode::Char('u') if model.can_start() => {
-                confirm_down = false;
+                down_footer = DownFooterState::Shortcuts;
+                down_feedback_until = None;
                 if let Err(error) = model.start_with_herdr(&herdr) {
                     model.set_warning(error.to_string());
                 }
             }
-            KeyCode::Char('d') if model.can_stop() => confirm_down = true,
+            KeyCode::Char('d') if model.can_stop() => {
+                down_footer = DownFooterState::Confirming;
+                down_feedback_until = None;
+            }
             KeyCode::Char('w') if model.can_stop() => {
                 if let Err(error) = open_tilt_web_ui(model.active_port()) {
                     model.set_warning(error.to_string());
                 }
             }
             key if is_refresh_key(key) => {
-                confirm_down = false;
+                down_footer = DownFooterState::Shortcuts;
+                down_feedback_until = None;
                 refresh_dashboard(&mut model, &tilt);
                 last_refresh = Instant::now();
             }
-            _ => confirm_down = false,
+            _ => {}
         }
     }
     Ok(())
@@ -1158,19 +1200,20 @@ fn wrap_shortcuts(width: u16, entries: &[(&str, &str, bool)]) -> Vec<Line<'stati
 fn render(
     frame: &mut ratatui::Frame<'_>,
     model: &DashboardModel,
-    confirm_down: bool,
+    down_footer: impl Into<DownFooterState>,
     show_help: bool,
     service_list: &mut ServiceListState,
 ) {
+    let down_footer = down_footer.into();
     let has_banner = model.warning().is_some();
     let metric_lines = service_metric_lines(model, frame.area().width);
     let metrics_height = u16::try_from(metric_lines.len()).unwrap_or(u16::MAX).max(1);
     let header_height = metrics_height;
     let metrics = Paragraph::new(Text::from(metric_lines));
-    let footer_lines = if confirm_down {
-        down_confirmation_footer(frame.area().width)
-    } else {
-        shortcut_legend(model, frame.area().width, show_help)
+    let footer_lines = match down_footer {
+        DownFooterState::Shortcuts => shortcut_legend(model, frame.area().width, show_help),
+        DownFooterState::Confirming => down_confirmation_footer(frame.area().width),
+        state => down_feedback_footer(state),
     };
     let footer_height = u16::try_from(footer_lines.len()).unwrap_or(u16::MAX).max(1);
     let chunks = Layout::default()
@@ -1503,6 +1546,19 @@ fn down_confirmation_footer(width: u16) -> Vec<Line<'static>> {
         lines.push(Line::from(spans));
     }
     lines
+}
+
+fn down_feedback_footer(state: DownFooterState) -> Vec<Line<'static>> {
+    let (message, color) = match state {
+        DownFooterState::Stopping => ("y yes — stopping Tilt…", Color::Yellow),
+        DownFooterState::Stopped => ("Tilt stopped", Color::Green),
+        DownFooterState::Cancelled => ("n no — keeping Tilt running", Color::Gray),
+        DownFooterState::Shortcuts | DownFooterState::Confirming => unreachable!(),
+    };
+    vec![Line::from(Span::styled(
+        message,
+        Style::default().fg(color),
+    ))]
 }
 
 fn overall_label(status: OverallStatus) -> &'static str {
@@ -2089,6 +2145,83 @@ mod tests {
         assert!(rendered.contains("n no"));
         assert!(!rendered.contains("q close"));
         assert!(!rendered.contains("Press d again"));
+    }
+
+    #[test]
+    fn accepted_down_confirmation_shows_progress_before_shortcuts_return() {
+        let project = Project {
+            root: PathBuf::from("/project"),
+            tiltfile: Some(PathBuf::from("/project/Tiltfile")),
+        };
+        let mut model = DashboardModel::new(project, PathBuf::from("/state"));
+        model.overall_status = OverallStatus::Running;
+        let mut list_state = ServiceListState::default();
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &model,
+                    DownFooterState::Stopping,
+                    false,
+                    &mut list_state,
+                )
+            })
+            .unwrap();
+        let rendered = buffer_text(&terminal);
+
+        assert!(rendered.contains("y yes — stopping Tilt…"));
+        assert!(!rendered.contains("q close"));
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &model,
+                    DownFooterState::Stopped,
+                    false,
+                    &mut list_state,
+                )
+            })
+            .unwrap();
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("Tilt stopped"));
+
+        terminal
+            .draw(|frame| render(frame, &model, false, false, &mut list_state))
+            .unwrap();
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("q close"));
+        assert!(!rendered.contains("Tilt stopped"));
+    }
+
+    #[test]
+    fn declined_down_confirmation_shows_the_choice_before_shortcuts_return() {
+        let project = Project {
+            root: PathBuf::from("/project"),
+            tiltfile: Some(PathBuf::from("/project/Tiltfile")),
+        };
+        let mut model = DashboardModel::new(project, PathBuf::from("/state"));
+        model.overall_status = OverallStatus::Running;
+        let mut list_state = ServiceListState::default();
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &model,
+                    DownFooterState::Cancelled,
+                    false,
+                    &mut list_state,
+                )
+            })
+            .unwrap();
+        let rendered = buffer_text(&terminal);
+
+        assert!(rendered.contains("n no — keeping Tilt running"));
+        assert!(!rendered.contains("q close"));
     }
 
     #[test]
