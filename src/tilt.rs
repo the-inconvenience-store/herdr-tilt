@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
+pub const DEFAULT_TILT_PORT: u16 = 10350;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CircleStatus {
     Green,

@@ -155,6 +155,68 @@ fn dashboard_without_a_default_tilt_api_remains_stopped() {
 }
 
 #[test]
+fn refresh_recovers_from_a_stale_retained_session() {
+    let workspace = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let tiltfile = workspace.path().join("Tiltfile");
+    fs::write(&tiltfile, "").unwrap();
+    let tiltfile = tiltfile.canonicalize().unwrap();
+    let project = Project {
+        root: workspace.path().canonicalize().unwrap(),
+        tiltfile: Some(tiltfile.clone()),
+    };
+    let path = record_path(state.path(), &tiltfile);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        serde_json::to_vec(&SessionRecord {
+            tiltfile: tiltfile.clone(),
+            project_root: project.root.clone(),
+            port: 41234,
+            runner_pid: u32::MAX,
+            tilt_pid: u32::MAX,
+            started_unix_ms: 1234,
+            phase: SessionPhase::Running,
+            exit_code: None,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let fake_tilt = workspace.path().join("tilt");
+    fs::write(
+        &fake_tilt,
+        format!(
+            r#"#!/bin/sh
+port=$6
+if [ "$port" = "41234" ]; then
+  exit 1
+fi
+if [ "$port" != "10350" ]; then
+  exit 9
+fi
+if [ "$2" = "sessions" ]; then
+  printf '%s\n' '{{"items":[{{"spec":{{"tiltfilePath":"{}"}},"status":{{"pid":321,"startTime":"2026-08-20T01:02:03Z"}}}}]}}'
+elif [ "$2" = "uibuttons" ]; then
+  printf '%s\n' '{{"items":[]}}'
+else
+  printf '%s\n' '{{"items":[{{"metadata":{{"name":"recovered-api"}},"status":{{"order":1,"updateStatus":"ok","runtimeStatus":"ok"}}}}]}}'
+fi
+"#,
+            tiltfile.display()
+        ),
+    )
+    .unwrap();
+    support::publish_executable(&fake_tilt);
+
+    let mut model = DashboardModel::new(project, state.path().to_path_buf());
+    model.refresh_with_tilt(&fake_tilt).unwrap();
+
+    assert_eq!(model.overall_status(), OverallStatus::Running);
+    assert_eq!(model.services[0].name, "recovered-api");
+}
+
+#[test]
 fn dashboard_rejects_a_tilt_api_for_another_project() {
     let workspace = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();

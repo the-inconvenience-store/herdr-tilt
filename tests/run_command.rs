@@ -149,6 +149,96 @@ fi
     );
 }
 
+#[test]
+fn down_stops_a_matching_tilt_started_outside_the_plugin() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let state = temp.path().join("state");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(state.join("sessions")).unwrap();
+    let tiltfile = project.join("Tiltfile");
+    fs::write(&tiltfile, "").unwrap();
+    let tiltfile = tiltfile.canonicalize().unwrap();
+
+    let capture = temp.path().join("tilt-calls");
+    let fake_tilt = temp.path().join("tilt");
+    fs::write(
+        &fake_tilt,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = "serve" ]; then
+  printf '%s\n' "$$" > "$PID_FILE"
+  trap 'exit 0' INT TERM
+  while :; do sleep 0.05; done
+elif [ "$2" = "sessions" ]; then
+  printf '{{"items":[{{"spec":{{"tiltfilePath":"{}"}},"status":{{"pid":%s,"startTime":"2026-08-20T01:02:03Z"}}}}]}}\n' "$MANUAL_PID"
+elif [ "$1" = "down" ]; then
+  printf '%s\n' "$*" >> "$CAPTURE"
+fi
+"#,
+            tiltfile.display()
+        ),
+    )
+    .unwrap();
+    support::publish_executable(&fake_tilt);
+
+    let pid_file = temp.path().join("manual-tilt.pid");
+    let mut manual_tilt = StdCommand::new("/bin/sh")
+        .args(["-c", &format!("'{}' serve & wait", fake_tilt.display())])
+        .env("PID_FILE", &pid_file)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until(Duration::from_secs(1), || pid_file.exists());
+    let manual_pid = fs::read_to_string(&pid_file).unwrap();
+    let context = serde_json::json!({
+        "workspace_id": "w1",
+        "workspace_cwd": project,
+        "focused_pane_cwd": project,
+    });
+
+    let output = StdCommand::new(assert_cmd::cargo::cargo_bin!("herdr-tilt"))
+        .arg("down")
+        .env("TILT_BIN_PATH", &fake_tilt)
+        .env("HERDR_PLUGIN_STATE_DIR", &state)
+        .env("HERDR_PLUGIN_CONTEXT_JSON", context.to_string())
+        .env("MANUAL_PID", manual_pid.trim())
+        .env("CAPTURE", &capture)
+        .output()
+        .unwrap();
+
+    let stopped = wait_for_exit(&mut manual_tilt, Duration::from_secs(1));
+    if !stopped {
+        manual_tilt.kill().unwrap();
+        manual_tilt.wait().unwrap();
+    }
+    assert!(
+        output.status.success(),
+        "down failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stopped,
+        "down left the matching external Tilt process alive"
+    );
+    assert_eq!(
+        fs::read_to_string(capture).unwrap().trim(),
+        format!("down -f {}", tiltfile.display())
+    );
+}
+
+fn wait_for_exit(child: &mut std::process::Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if child.try_wait().unwrap().is_some() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
 fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {

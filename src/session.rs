@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::project::{InvocationContext, Project, resolve_project};
+use crate::tilt::{DEFAULT_TILT_PORT, parse_session_identity};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -107,6 +108,30 @@ pub fn record_path(state_dir: &Path, tiltfile: &Path) -> PathBuf {
     state_dir
         .join("sessions")
         .join(format!("{}.json", project_key(tiltfile)))
+}
+
+pub fn retained_session_is_active(project: &Project, state_dir: &Path) -> Result<bool> {
+    let Some(record) = load_session(project, state_dir) else {
+        return Ok(false);
+    };
+    if record.phase != SessionPhase::Running {
+        return Ok(false);
+    }
+    let lock_path = state_dir
+        .join("sessions")
+        .join(format!("{}.lock", project_key(&record.tiltfile)));
+    project_lock_is_held(&lock_path)
+}
+
+pub fn clear_session(project: &Project, state_dir: &Path) -> Result<()> {
+    let Some(tiltfile) = project.tiltfile.as_ref() else {
+        return Ok(());
+    };
+    let path = record_path(state_dir, tiltfile);
+    if path.exists() {
+        fs::remove_file(path).context("clear Tilt session state")?;
+    }
+    Ok(())
 }
 
 fn run_project(project: &Project, state_dir: &Path) -> Result<()> {
@@ -214,18 +239,26 @@ fn down_project(project: &Project, state_dir: &Path) -> Result<()> {
         .context("No Tiltfile found in this workspace")?;
     let key = project_key(tiltfile);
     let lock_path = state_dir.join("sessions").join(format!("{key}.lock"));
-    let record_path = record_path(state_dir, tiltfile);
-
-    if project_lock_is_held(&lock_path)?
+    let retained_pid = if project_lock_is_held(&lock_path)?
         && let Some(record) = load_session(project, state_dir)
         && record.phase == SessionPhase::Running
     {
-        let pid = i32::try_from(record.tilt_pid).context("Tilt PID is out of range")?;
-        kill(Pid::from_raw(pid), Signal::SIGTERM).context("signal retained Tilt process")?;
+        Some(record.tilt_pid)
+    } else {
+        None
+    };
+    let tilt = env::var("TILT_BIN_PATH").unwrap_or_else(|_| "tilt".to_owned());
+    let external_pid = if retained_pid.is_none() {
+        matching_tilt_pid(&tilt, tiltfile, DEFAULT_TILT_PORT)?
+    } else {
+        None
+    };
+
+    if let Some(pid) = retained_pid {
+        signal_process(pid, Signal::SIGTERM, "retained Tilt process")?;
         wait_for_runner_exit(project, state_dir)?;
     }
 
-    let tilt = env::var("TILT_BIN_PATH").unwrap_or_else(|_| "tilt".to_owned());
     let output = Command::new(&tilt)
         .args(["down", "-f", &tiltfile.display().to_string()])
         .current_dir(&project.root)
@@ -237,13 +270,24 @@ fn down_project(project: &Project, state_dir: &Path) -> Result<()> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    if record_path.exists() {
-        fs::remove_file(record_path).context("clear stopped Tilt session state")?;
+    if let Some(pid) = external_pid {
+        match matching_tilt_pid(&tilt, tiltfile, DEFAULT_TILT_PORT)? {
+            Some(confirmed_pid) if confirmed_pid == pid => {
+                signal_process(pid, Signal::SIGTERM, "external Tilt process")?;
+                wait_for_process_exit(pid)?;
+            }
+            Some(_) => bail!("Tilt process changed while resources were being stopped"),
+            None => {}
+        }
     }
+    clear_session(project, state_dir)?;
     Ok(())
 }
 
 fn project_lock_is_held(path: &Path) -> Result<bool> {
+    if path.parent().is_none_or(|parent| !parent.is_dir()) {
+        return Ok(false);
+    }
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -259,6 +303,54 @@ fn project_lock_is_held(path: &Path) -> Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
         Err(error) => Err(error).context("check project session lock"),
     }
+}
+
+fn matching_tilt_pid(tilt: &str, tiltfile: &Path, port: u16) -> Result<Option<u32>> {
+    let output = Command::new(tilt)
+        .args(["get", "sessions", "-o", "json", "--port", &port.to_string()])
+        .output()
+        .context("query external Tilt Session")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let identity = parse_session_identity(&String::from_utf8_lossy(&output.stdout))?;
+    let reported_tiltfile = identity
+        .tiltfile
+        .canonicalize()
+        .unwrap_or(identity.tiltfile);
+    if reported_tiltfile != tiltfile {
+        return Ok(None);
+    }
+    if identity.pid == 0 {
+        bail!("Tilt API returned an invalid process ID");
+    }
+    Ok(Some(identity.pid))
+}
+
+fn signal_process(pid: u32, signal: Signal, description: &str) -> Result<()> {
+    let pid = i32::try_from(pid).context("Tilt PID is out of range")?;
+    kill(Pid::from_raw(pid), signal).with_context(|| format!("signal {description}"))
+}
+
+fn wait_for_process_exit(pid: u32) -> Result<()> {
+    let pid = i32::try_from(pid).context("Tilt PID is out of range")?;
+    let pid = Pid::from_raw(pid);
+    for _ in 0..100 {
+        match kill(pid, None) {
+            Err(nix::errno::Errno::ESRCH) => return Ok(()),
+            Ok(()) | Err(nix::errno::Errno::EPERM) => thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(error).context("check Tilt process status"),
+        }
+    }
+    kill(pid, Signal::SIGKILL).context("force external Tilt process to stop")?;
+    for _ in 0..20 {
+        match kill(pid, None) {
+            Err(nix::errno::Errno::ESRCH) => return Ok(()),
+            Ok(()) | Err(nix::errno::Errno::EPERM) => thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(error).context("check forced Tilt process status"),
+        }
+    }
+    bail!("Timed out waiting for external Tilt process to stop")
 }
 
 fn wait_for_runner_exit(project: &Project, state_dir: &Path) -> Result<()> {

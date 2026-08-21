@@ -8,11 +8,14 @@ use std::time::{Duration, Instant};
 use crate::logs::{LogBuffer, LogNavigation, TiltLogStream};
 use crate::project::Project;
 use crate::project::{InvocationContext, resolve_project};
-use crate::session::{SessionPhase, discard_start_request, load_session, prepare_start_request};
+use crate::session::{
+    SessionPhase, clear_session, discard_start_request, load_session, prepare_start_request,
+    retained_session_is_active,
+};
 use crate::tilt::{
-    CircleStatus, ResourceGroup, Service, ServiceAction, activate_service_action,
-    attach_service_actions, open_tilt_web_ui, parse_session_identity, parse_ui_buttons,
-    parse_ui_resources,
+    CircleStatus, DEFAULT_TILT_PORT, ResourceGroup, Service, ServiceAction,
+    activate_service_action, attach_service_actions, open_tilt_web_ui, parse_session_identity,
+    parse_ui_buttons, parse_ui_resources,
 };
 use anyhow::{Context, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -27,7 +30,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
-const DEFAULT_TILT_PORT: u16 = 10350;
 const SERVICE_PAGE_SIZE: usize = 10;
 const SERVICE_SELECTION_BG: Color = Color::Rgb(58, 58, 58);
 
@@ -320,47 +322,44 @@ impl DashboardModel {
     }
 
     pub fn refresh_with_tilt(&mut self, tilt: impl AsRef<std::ffi::OsStr>) -> Result<()> {
+        let tilt = tilt.as_ref();
         let Some(project_tiltfile) = self.project.tiltfile.as_ref() else {
             return Ok(());
         };
         let session = load_session(&self.project, &self.state_dir);
-        if let Some(session) = session.as_ref()
-            && session.phase == SessionPhase::Exited
-        {
-            self.services.clear();
-            self.groups.clear();
-            self.overall_status = if session.exit_code.is_some_and(|code| code != 0) {
-                OverallStatus::Failed
-            } else {
-                OverallStatus::Stopped
-            };
-            self.warning = session
-                .exit_code
-                .filter(|code| *code != 0)
-                .map(|code| format!("Tilt exited with status {code}"));
-            return Ok(());
-        }
-
         let (port, expected_pid, managed) = session
             .as_ref()
+            .filter(|session| session.phase == SessionPhase::Running)
             .map_or((DEFAULT_TILT_PORT, None, false), |session| {
                 (session.port, Some(session.tilt_pid), true)
             });
         let expected_tiltfile = session
             .as_ref()
+            .filter(|session| session.phase == SessionPhase::Running)
             .map_or(project_tiltfile, |session| &session.tiltfile);
 
-        let identity_output = Command::new(&tilt)
+        let identity_output = Command::new(tilt)
             .args(["get", "sessions", "-o", "json", "--port", &port.to_string()])
             .output()
             .context("query Tilt Session")?;
         if !identity_output.status.success() {
             if !managed {
-                self.overall_status = OverallStatus::Stopped;
-                self.warning = None;
+                let exit_code = session.as_ref().and_then(|session| session.exit_code);
+                self.overall_status = if exit_code.is_some_and(|code| code != 0) {
+                    OverallStatus::Failed
+                } else {
+                    OverallStatus::Stopped
+                };
+                self.warning = exit_code
+                    .filter(|code| *code != 0)
+                    .map(|code| format!("Tilt exited with status {code}"));
                 self.services.clear();
                 self.groups.clear();
                 return Ok(());
+            }
+            if !retained_session_is_active(&self.project, &self.state_dir)? {
+                clear_session(&self.project, &self.state_dir)?;
+                return self.refresh_with_tilt(tilt);
             }
             self.overall_status = OverallStatus::Starting;
             self.warning = Some("Waiting for the Tilt API".to_owned());
@@ -392,7 +391,11 @@ impl DashboardModel {
             bail!("Tilt API port belongs to another Tiltfile or process");
         }
 
-        let output = Command::new(&tilt)
+        if !managed && session.is_some() {
+            clear_session(&self.project, &self.state_dir)?;
+        }
+
+        let output = Command::new(tilt)
             .args([
                 "get",
                 "uiresources",
@@ -412,7 +415,7 @@ impl DashboardModel {
             );
         }
         let mut snapshot = parse_ui_resources(&String::from_utf8_lossy(&output.stdout))?;
-        let buttons = Command::new(tilt.as_ref())
+        let buttons = Command::new(tilt)
             .args([
                 "get",
                 "uibuttons",
