@@ -19,7 +19,7 @@ Linux, or x86-64 Linux.
 Install a tagged release directly from GitHub:
 
 ```sh
-herdr plugin install the-inconvenience-store/herdr-tilt --ref v0.1.1
+herdr plugin install the-inconvenience-store/herdr-tilt --ref v0.1.2
 ```
 
 Herdr clones the tagged source, then the plugin installer downloads the
